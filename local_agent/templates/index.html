@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Local Agent — Ignite CRM</title>
+  <link rel="stylesheet" href="/static/basecoat/basecoat.css">
+  <link rel="stylesheet" href="/static/basecoat/app.css">
+  <script>
+    if (localStorage.theme === 'dark' ||
+        (!('theme' in localStorage) && matchMedia('(prefers-color-scheme: dark)').matches)) {
+      document.documentElement.classList.add('dark');
+    }
+  </script>
+  <script src="/static/basecoat/basecoat.js" defer></script>
+</head>
+<body>
+<div class="main">
+
+  <header class="topbar">
+    <h1>Local Agent <span class="badge badge-secondary">sends as you</span></h1>
+    <div class="row">
+      <span class="text-sm muted">{{ profile.bits_email }} · batch {{ profile.batch }}</span>
+      <span class="text-sm muted">·</span>
+      <span class="text-sm muted" id="quota">{{ profile.sent_last_24h }}/{{ profile.daily_cap }} today</span>
+      <button type="button" class="btn-ghost btn-sm" onclick="toggleTheme()">◐</button>
+    </div>
+  </header>
+
+  <main class="content">
+
+    <div class="card mb-3">
+      <section class="row wrap">
+        <select class="select" id="campaign" style="min-width:18rem">
+          <option value="">Loading campaigns…</option>
+        </select>
+        <button class="btn-outline" onclick="verifyAuth()">Verify Gmail</button>
+        <button class="btn-outline" onclick="preflight()" id="preflightBtn" disabled>Preflight</button>
+        <button class="btn" onclick="send()" id="sendBtn" disabled>Send</button>
+        <span class="grow"></span>
+        <button class="btn-ghost btn-sm" onclick="reconcile()" title="Resolve drafts left by a crash">
+          Resolve stranded drafts
+        </button>
+      </section>
+      <footer>
+        <span class="text-xs muted" id="authState">
+          Connected to {{ crm_url }} — verify Gmail before your first send.
+        </span>
+      </footer>
+    </div>
+
+    <div id="summary"></div>
+
+    <div class="split">
+      <div class="table-wrap">
+        <table class="table">
+          <thead><tr>
+            <th class="shrink"><input type="checkbox" class="input-checkbox" id="selectAll"></th>
+            <th>Name</th><th>Company</th><th>Designation</th><th>Status</th>
+          </tr></thead>
+          <tbody id="rows">
+            <tr><td colspan="5" class="empty">Pick a campaign to load your assigned contacts.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="card sticky">
+        <header>
+          <h2>Selection</h2>
+          <p class="muted text-sm"><span id="count">0</span> selected</p>
+        </header>
+        <section>
+          <div id="preview" class="text-sm muted">
+            Run a preflight to see exactly what will be sent, and to whom.
+          </div>
+        </section>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div id="toaster" class="toaster"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const picks  = () => [...document.querySelectorAll('.pick')];
+const chosen = () => picks().filter(p => p.checked).map(p => p.value);
+
+function toggleTheme() {
+  localStorage.theme = document.documentElement.classList.toggle('dark') ? 'dark' : 'light';
+}
+
+function setStatus(id, status, detail) {
+  const cell = $('s-' + id);
+  if (!cell) return;
+  cell.textContent = status + (detail ? ' — ' + detail : '');
+  cell.className = 'text-xs font-medium s-' + status;
+}
+
+async function req(url, opts) {
+  const r = await fetch(url, opts);
+  const d = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(d.detail || r.statusText);
+  return d;
+}
+const post = (url, body) => req(url, {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: body ? JSON.stringify(body) : null,
+});
+
+async function loadCampaigns() {
+  try {
+    const cs = await req('/api/campaigns');
+    $('campaign').innerHTML = '<option value="">— select campaign —</option>' +
+      cs.map(c => `<option value="${c.id}">${c.title}</option>`).join('');
+  } catch (e) {
+    $('campaign').innerHTML = '<option value="">Could not reach the CRM</option>';
+    $('authState').textContent = e.message;
+  }
+}
+
+async function loadContacts() {
+  const id = $('campaign').value;
+  $('sendBtn').disabled = true;
+  $('preflightBtn').disabled = !id;
+  if (!id) return;
+
+  const list = await req('/api/contacts?campaign_id=' + id);
+  $('rows').innerHTML = list.map(c => `
+    <tr class="${c.already_mailed ? 'is-disabled' : ''}">
+      <td><input type="checkbox" class="input-checkbox pick" value="${c.id}" ${c.already_mailed ? 'disabled' : ''}></td>
+      <td>${c.name}<div class="text-xs muted">${c.email}</div></td>
+      <td class="text-sm">${c.company}</td>
+      <td class="text-sm muted">${c.designation || '—'}</td>
+      <td id="s-${c.id}" class="text-xs muted">${c.already_mailed ? 'already mailed' : ''}</td>
+    </tr>`).join('') ||
+    '<tr><td colspan="5" class="empty">No contacts assigned to you.</td></tr>';
+
+  picks().forEach(p => p.addEventListener('change', sync));
+  sync();
+}
+
+function sync() {
+  const n = chosen().length;
+  $('count').textContent = n;
+  picks().forEach(p => p.closest('tr').classList.toggle('is-selected', p.checked));
+  $('preflightBtn').disabled = n === 0;
+}
+
+async function verifyAuth() {
+  try {
+    const d = await post('/auth/verify');
+    $('authState').textContent = 'Authenticated as ' + d.authenticated_as;
+  } catch (e) { $('authState').textContent = e.message; }
+}
+
+async function preflight() {
+  const ids = chosen();
+  if (!ids.length) return;
+  try {
+    const d = await post('/api/preflight', { campaign_id: $('campaign').value, contact_ids: ids });
+    d.outcomes.forEach(o => setStatus(o.contact_id, o.status, o.detail));
+
+    $('summary').innerHTML = `
+      <div class="alert mb-2"><section><p>
+        <b>${d.sendable}</b> sendable of ${ids.length} selected ·
+        ${d.remaining_today} left in today's quota
+      </p></section></div>`;
+
+    $('preview').innerHTML = d.preview ? `
+      <div class="text-xs muted mb-1">To</div>
+      <div class="preview mb-2">${d.preview.to}</div>
+      <div class="text-xs muted mb-1">Subject</div>
+      <div class="preview mb-2">${d.preview.subject}</div>
+      <div class="text-xs muted mb-1">Body</div>
+      <div class="preview">${d.preview.body}</div>`
+      : '<p class="text-sm muted">Nothing sendable in this selection.</p>';
+
+    $('sendBtn').disabled = d.sendable === 0;
+  } catch (e) { alert(e.message); }
+}
+
+async function send() {
+  const ids = chosen();
+  if (!confirm(`Send to ${ids.length} contact(s)? This mails real people.`)) return;
+  $('sendBtn').disabled = true;
+
+  const r = await fetch('/api/send', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ campaign_id: $('campaign').value, contact_ids: ids }),
+  });
+  if (!r.ok) {
+    const d = await r.json().catch(() => ({}));
+    $('sendBtn').disabled = false;
+    return alert(d.detail || 'Send failed');
+  }
+
+  // Results stream back as newline-delimited JSON, one line per contact.
+  const reader = r.body.getReader(), decoder = new TextDecoder();
+  let buffer = '';
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop();
+    for (const line of lines.filter(Boolean)) {
+      const o = JSON.parse(line);
+      setStatus(o.contact_id, o.status, o.detail);
+    }
+  }
+  await loadContacts();
+}
+
+async function reconcile() {
+  try {
+    const out = await post('/api/reconcile');
+    alert(out.length
+      ? out.map(o => `${o.email}: ${o.status} — ${o.detail}`).join('\n')
+      : 'No stranded drafts.');
+    await loadContacts();
+  } catch (e) { alert(e.message); }
+}
+
+$('selectAll').addEventListener('change', e => {
+  picks().filter(p => !p.disabled).forEach(p => p.checked = e.target.checked);
+  sync();
+});
+$('campaign').addEventListener('change', loadContacts);
+loadCampaigns();
+</script>
+</body>
+</html>

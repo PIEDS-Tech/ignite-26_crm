@@ -1,0 +1,27 @@
+from django.urls import path
+
+from . import views
+
+app_name = "crm"
+
+urlpatterns = [
+    path("", views.home, name="home"),
+
+    path("contacts/", views.contact_list, name="contact_list"),
+    path("contacts/import/", views.contact_import, name="contact_import"),
+    path("contacts/import/confirm/", views.contact_import_confirm, name="contact_import_confirm"),
+    path("contacts/<uuid:pk>/", views.contact_detail, name="contact_detail"),
+
+    path("assign/", views.assign, name="assign"),
+    path("assign/apply/", views.assign_apply, name="assign_apply"),
+
+    path("campaigns/", views.campaign_list, name="campaign_list"),
+    path("campaigns/new/", views.campaign_edit, name="campaign_new"),
+    path("campaigns/<uuid:pk>/", views.campaign_detail, name="campaign_detail"),
+    path("campaigns/<uuid:pk>/edit/", views.campaign_edit, name="campaign_edit"),
+    path("campaigns/<uuid:pk>/status/", views.campaign_transition, name="campaign_transition"),
+
+    path("members/", views.member_list, name="member_list"),
+    path("members/tokens/issue/", views.token_issue, name="token_issue"),
+    path("members/tokens/<uuid:pk>/revoke/", views.token_revoke, name="token_revoke"),
+]

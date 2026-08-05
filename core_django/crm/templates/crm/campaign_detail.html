@@ -1,0 +1,88 @@
+{% extends "crm/base.html" %}
+{% block title %}{{ campaign.title }} — Ignite CRM{% endblock %}
+{% block heading %}{{ campaign.title }}{% endblock %}
+
+{% block content %}
+<div class="row-b mb-3 wrap">
+  <div class="row wrap">
+    <span class="badge {% if campaign.status == 'active' %}badge-primary{% else %}badge-secondary{% endif %}">{{ campaign.status }}</span>
+    {% if is_lead %}
+      {% for t in transitions %}
+        <form method="post" action="{% url 'crm:campaign_transition' campaign.pk %}">
+          {% csrf_token %}
+          <input type="hidden" name="status" value="{{ t.value }}">
+          <button type="submit" class="btn-outline btn-sm">Mark {{ t.value }}</button>
+        </form>
+      {% endfor %}
+    {% endif %}
+  </div>
+  {% if is_lead %}<a class="btn-outline" href="{% url 'crm:campaign_edit' campaign.pk %}">Edit</a>{% endif %}
+</div>
+
+<div class="grid grid-4 mb-3">
+  <div class="card"><section class="stat">
+    <div class="value">{{ assigned_pool }}</div><div class="label">assigned pool</div>
+  </section></div>
+  <div class="card"><section class="stat">
+    <div class="value">{{ counts.sent }}</div><div class="label">sent</div>
+  </section></div>
+  <div class="card"><section class="stat">
+    <div class="value muted">{{ counts.draft }}</div><div class="label">draft / in flight</div>
+  </section></div>
+  <div class="card"><section class="stat">
+    <div class="value {% if counts.failed %}s-FAILED{% endif %}">{{ counts.failed }}</div><div class="label">failed</div>
+  </section></div>
+</div>
+
+<div class="split">
+  <div class="card">
+    <header><h2>Mailings</h2></header>
+    <section>
+      <div class="table-wrap">
+        <table class="table">
+          <thead><tr><th>Contact</th><th>Status</th><th>By</th><th>Sent</th></tr></thead>
+          <tbody>
+          {% for m in mailings %}
+            <tr>
+              <td>
+                <a href="{% url 'crm:contact_detail' m.contact.pk %}">{{ m.contact.email }}</a>
+                {% if m.error_detail %}<div class="text-xs s-FAILED">{{ m.error_detail|truncatechars:90 }}</div>{% endif %}
+              </td>
+              <td><span class="s-{{ m.status|upper }} text-sm font-medium">{{ m.status }}</span></td>
+              <td class="text-sm muted">{{ m.sent_by.name }}</td>
+              <td class="text-sm muted">{{ m.sent_at|date:"d M H:i"|default:"—" }}</td>
+            </tr>
+          {% empty %}
+            <tr><td colspan="4" class="empty">Nothing sent yet.</td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      {% include "crm/_pagination.html" with page=mailings %}
+    </section>
+  </div>
+
+  <div class="card sticky">
+    <header>
+      <h2>Preview</h2>
+      <p class="muted text-sm">
+        {% if sample %}Rendered for {{ sample.full_name }} at {{ sample.company }}.
+        {% else %}No assigned contact to preview against.{% endif %}
+      </p>
+    </header>
+    <section>
+      {% if preview_error %}
+        <div class="alert alert-destructive"><section><p>{{ preview_error }}</p></section></div>
+      {% elif preview %}
+        <div class="text-xs muted mb-1">Subject</div>
+        <div class="preview mb-2">{{ preview.subject }}</div>
+        <div class="text-xs muted mb-1">Body</div>
+        <div class="preview">{{ preview.body }}</div>
+      {% endif %}
+      <div class="text-xs muted mt-2">
+        Variables: {{ campaign.var_list|join:", "|default:"none" }}
+      </div>
+    </section>
+  </div>
+</div>
+{% endblock %}

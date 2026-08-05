@@ -1,0 +1,77 @@
+{% load static %}<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Ignite CRM{% endblock %}</title>
+  <link rel="stylesheet" href="{% static 'basecoat/basecoat.css' %}">
+  <link rel="stylesheet" href="{% static 'basecoat/app.css' %}">
+  <script>
+    // Apply the saved theme before first paint so there is no flash of light.
+    if (localStorage.theme === 'dark' ||
+        (!('theme' in localStorage) && matchMedia('(prefers-color-scheme: dark)').matches)) {
+      document.documentElement.classList.add('dark');
+    }
+  </script>
+  <script src="{% static 'basecoat/basecoat.js' %}" defer></script>
+</head>
+<body>
+<div class="app">
+
+  <nav class="sidebar">
+    <div class="brand">Ignite CRM <span class="badge badge-secondary">PIEDS</span></div>
+
+    <a href="{% url 'crm:home' %}" {% if request.resolver_match.url_name == 'home' %}aria-current="page"{% endif %}>Dashboard</a>
+    <a href="{% url 'crm:contact_list' %}" {% if 'contact' in request.resolver_match.url_name %}aria-current="page"{% endif %}>Contacts</a>
+    <a href="{% url 'crm:campaign_list' %}" {% if 'campaign' in request.resolver_match.url_name %}aria-current="page"{% endif %}>Campaigns</a>
+    {% if is_lead %}
+      <a href="{% url 'crm:assign' %}" {% if request.resolver_match.url_name == 'assign' %}aria-current="page"{% endif %}>Assign</a>
+      <a href="{% url 'crm:contact_import' %}" {% if request.resolver_match.url_name == 'contact_import' %}aria-current="page"{% endif %}>Import CSV</a>
+      <a href="{% url 'crm:member_list' %}" {% if 'member' in request.resolver_match.url_name %}aria-current="page"{% endif %}>Team &amp; Tokens</a>
+    {% endif %}
+
+    <div class="spacer"></div>
+    <a href="/admin/">Django admin</a>
+  </nav>
+
+  <div class="main">
+    <header class="topbar">
+      <h1>{% block heading %}{% endblock %}</h1>
+      <div class="row">
+        {% if member %}
+          <span class="text-sm muted">{{ member.name }} · batch {{ member.batch }}{% if is_lead %} · lead{% endif %}</span>
+        {% endif %}
+        <button type="button" class="btn-ghost btn-sm" onclick="toggleTheme()" aria-label="Toggle theme">◐</button>
+        <form method="post" action="{% url 'logout' %}">{% csrf_token %}
+          <button type="submit" class="btn-outline btn-sm">Log out</button>
+        </form>
+      </div>
+    </header>
+
+    <main class="content">
+      {% if messages %}
+        <div class="col mb-2">
+          {% for m in messages %}
+            <div class="alert{% if m.tags == 'error' %} alert-destructive{% endif %}">
+              <section><p>{{ m }}</p></section>
+            </div>
+          {% endfor %}
+        </div>
+      {% endif %}
+
+      {% block content %}{% endblock %}
+    </main>
+  </div>
+</div>
+
+<div id="toaster" class="toaster"></div>
+
+<script>
+  function toggleTheme() {
+    const dark = document.documentElement.classList.toggle('dark');
+    localStorage.theme = dark ? 'dark' : 'light';
+  }
+</script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

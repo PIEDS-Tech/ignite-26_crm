@@ -1,0 +1,46 @@
+{% extends "crm/base.html" %}
+{% block title %}{% if campaign %}Edit{% else %}New{% endif %} campaign — Ignite CRM{% endblock %}
+{% block heading %}{% if campaign %}Edit campaign{% else %}New campaign{% endif %}{% endblock %}
+
+{% block content %}
+<form method="post" class="split">
+  {% csrf_token %}
+
+  <div class="card">
+    <section class="col">
+      {% for field in form %}
+        <div class="col" style="gap:.35rem">
+          <label class="label" for="{{ field.id_for_label }}">{{ field.label }}</label>
+          {{ field }}
+          {% if field.help_text %}<p class="text-xs muted">{{ field.help_text }}</p>{% endif %}
+          {% for e in field.errors %}<p class="text-xs s-FAILED">{{ e }}</p>{% endfor %}
+        </div>
+      {% endfor %}
+      <div class="row">
+        <button type="submit" class="btn">Save</button>
+        <a class="btn-ghost" href="{% url 'crm:campaign_list' %}">Cancel</a>
+      </div>
+    </section>
+  </div>
+
+  <div class="card sticky">
+    <header><h2>Placeholders</h2></header>
+    <section class="text-sm col">
+      <p class="muted">
+        Write {% verbatim %}<code>{{ first_name }}</code>{% endverbatim %} in the
+        subject or body, and list every variable you use in the Variables field.
+      </p>
+      <p class="muted">Available:</p>
+      <ul class="text-xs font-mono muted">
+        <li>first_name</li><li>last_name</li><li>full_name</li>
+        <li>email</li><li>company</li><li>designation</li>
+      </ul>
+      <p class="text-xs muted">
+        A campaign cannot go active until every placeholder is declared and real.
+        That check is what stops 200 mails going out saying
+        {% verbatim %}&ldquo;Dear {{ first_name }}&rdquo;{% endverbatim %}.
+      </p>
+    </section>
+  </div>
+</form>
+{% endblock %}

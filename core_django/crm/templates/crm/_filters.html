@@ -1,0 +1,27 @@
+{# Shared filter bar for the contact list and the assignment screen. #}
+<form method="get" class="row wrap mb-2">
+  <input class="input grow" type="search" name="q" value="{{ filters.q }}"
+         placeholder="Search name, email or company…" style="max-width:22rem">
+
+  <select class="select" name="company">
+    <option value="">All companies</option>
+    {% for c in companies %}
+      <option value="{{ c }}" {% if filters.company == c %}selected{% endif %}>{{ c }}</option>
+    {% endfor %}
+  </select>
+
+  <select class="select" name="assignee">
+    <option value="">Anyone</option>
+    <option value="unassigned" {% if filters.assignee == 'unassigned' %}selected{% endif %}>Unassigned</option>
+    <option value="mine" {% if filters.assignee == 'mine' %}selected{% endif %}>Assigned to me</option>
+    {% for m in members %}
+      <option value="{{ m.pk }}" {% if filters.assignee == m.pk|stringformat:'s' %}selected{% endif %}>
+        {{ m.name }} ({{ m.load }})
+      </option>
+    {% endfor %}
+  </select>
+
+  <button type="submit" class="btn">Filter</button>
+  <a class="btn-ghost" href="{{ request.path }}">Reset</a>
+  <span class="muted text-sm">{{ total }} match{{ total|pluralize:"es" }}</span>
+</form>

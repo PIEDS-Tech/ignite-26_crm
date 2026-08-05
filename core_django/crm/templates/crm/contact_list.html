@@ -1,0 +1,37 @@
+{% extends "crm/base.html" %}
+{% block title %}Contacts — Ignite CRM{% endblock %}
+{% block heading %}Contacts{% endblock %}
+
+{% block content %}
+{% include "crm/_filters.html" %}
+
+<div class="table-wrap">
+  <table class="table">
+    <thead><tr>
+      <th>Name</th><th>Company</th><th>Designation</th>
+      <th>Assigned to</th><th>Last contacted</th>
+    </tr></thead>
+    <tbody>
+    {% for c in page %}
+      <tr>
+        <td>
+          <a href="{% url 'crm:contact_detail' c.pk %}">{{ c.full_name }}</a>
+          <div class="text-xs muted">{{ c.email }}</div>
+        </td>
+        <td class="text-sm">{{ c.company }}</td>
+        <td class="text-sm muted">{{ c.designation|default:"—" }}</td>
+        <td class="text-sm">
+          {% if c.assigned_to %}<span class="badge badge-secondary">{{ c.assigned_to.name }}</span>
+          {% else %}<span class="muted">unassigned</span>{% endif %}
+        </td>
+        <td class="text-sm muted">{{ c.last_contacted_at|date:"d M Y"|default:"never" }}</td>
+      </tr>
+    {% empty %}
+      <tr><td colspan="5" class="empty">No contacts match these filters.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{% include "crm/_pagination.html" %}
+{% endblock %}

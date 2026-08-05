@@ -1,0 +1,84 @@
+{% extends "crm/base.html" %}
+{% block title %}{{ contact.full_name }} — Ignite CRM{% endblock %}
+{% block heading %}{{ contact.full_name }}{% endblock %}
+
+{% block content %}
+<div class="split">
+  <div class="col">
+
+    <div class="card">
+      <header><h2>Mail history</h2></header>
+      <section>
+        <div class="table-wrap">
+          <table class="table">
+            <thead><tr><th>Campaign</th><th>Status</th><th>By</th><th>Sent</th><th>Thread</th></tr></thead>
+            <tbody>
+            {% for m in mailings %}
+              <tr>
+                <td><a href="{% url 'crm:campaign_detail' m.campaign.pk %}">{{ m.campaign.title }}</a>
+                  {% if m.error_detail %}<div class="text-xs s-FAILED">{{ m.error_detail }}</div>{% endif %}
+                </td>
+                <td><span class="s-{{ m.status|upper }} text-sm font-medium">{{ m.status }}</span></td>
+                <td class="text-sm muted">{{ m.sent_by.name }}</td>
+                <td class="text-sm muted">{{ m.sent_at|date:"d M Y H:i"|default:"—" }}</td>
+                <td class="text-xs font-mono muted">{{ m.mail_thread_id|truncatechars:14 }}</td>
+              </tr>
+            {% empty %}
+              <tr><td colspan="5" class="empty">Never mailed.</td></tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <div class="card">
+      <header><h2>Notes</h2></header>
+      <section class="col">
+        <form method="post" class="col">
+          {% csrf_token %}
+          {{ form.body }}
+          {{ form.body.errors }}
+          <div><button type="submit" class="btn btn-sm">Add note</button></div>
+        </form>
+
+        <div class="col mt-2">
+        {% for n in notes %}
+          <div style="border-left:2px solid var(--color-border); padding-left:.75rem">
+            <div class="text-xs muted">
+              {{ n.author.name|default:"unknown" }} · {{ n.created_at|date:"d M Y H:i" }}
+            </div>
+            <div class="text-sm">{{ n.body|linebreaksbr }}</div>
+          </div>
+        {% empty %}
+          <p class="muted text-sm">No notes yet.</p>
+        {% endfor %}
+        </div>
+      </section>
+    </div>
+  </div>
+
+  <div class="card sticky">
+    <header><h2>Details</h2></header>
+    <section class="col text-sm">
+      <div><span class="muted">Email</span><br>{{ contact.email }}</div>
+      <div><span class="muted">Company</span><br>{{ contact.company }}</div>
+      <div><span class="muted">Designation</span><br>{{ contact.designation|default:"—" }}</div>
+      <div><span class="muted">Phone</span><br>{{ contact.phone_no|default:"—" }}</div>
+      {% if contact.linkedin %}
+        <div><span class="muted">LinkedIn</span><br><a href="{{ contact.linkedin }}" target="_blank" rel="noopener">Profile</a></div>
+      {% endif %}
+      <hr>
+      <div><span class="muted">Assigned to</span><br>
+        {{ contact.assigned_to.name|default:"unassigned" }}
+        {% if contact.assigned_at %}<span class="text-xs muted"> since {{ contact.assigned_at|date:"d M Y" }}</span>{% endif %}
+      </div>
+      <div><span class="muted">Last contacted</span><br>
+        {% if contact.last_contacted_at %}
+          {{ contact.last_contacted_at|date:"d M Y H:i" }} by {{ contact.last_contacted_by.name }}
+        {% else %}never{% endif %}
+      </div>
+    </section>
+  </div>
+</div>
+{% endblock %}

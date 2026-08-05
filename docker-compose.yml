@@ -1,0 +1,20 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: ignite_crm_pg
+    environment:
+      POSTGRES_USER: ignite
+      POSTGRES_PASSWORD: ignite
+      POSTGRES_DB: ignite_crm
+    ports:
+      - "5432:5432"
+    volumes:
+      - ignite_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ignite -d ignite_crm"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  ignite_pgdata:

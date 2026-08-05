@@ -1,0 +1,65 @@
+{% extends "crm/base.html" %}
+{% block title %}Import contacts — Ignite CRM{% endblock %}
+{% block heading %}Import contacts{% endblock %}
+
+{% block content %}
+<div class="card mb-3">
+  <header>
+    <h2>Upload a CSV</h2>
+    <p class="muted text-sm">
+      Nothing is written until you confirm the preview. A file with any invalid
+      row still imports its good rows — but you get to see which is which first.
+    </p>
+  </header>
+  <section>
+    <form method="post" enctype="multipart/form-data" class="row wrap">
+      {% csrf_token %}
+      <input class="input" type="file" name="file" accept=".csv" required>
+      <button type="submit" class="btn">Validate</button>
+    </form>
+    <p class="text-xs muted mt-1">{{ form.file.help_text }}</p>
+  </section>
+</div>
+
+{% if preview and preview.ok %}
+  <div class="row wrap mb-2">
+    <span class="badge badge-primary">{{ preview.rows|length }} rows read</span>
+    <span class="badge">{{ preview.importable|length }} new</span>
+    <span class="badge badge-secondary">{{ preview.count_duplicate }} duplicate</span>
+    <span class="badge badge-destructive">{{ preview.count_invalid }} invalid</span>
+  </div>
+
+  <div class="table-wrap mb-2">
+    <table class="table">
+      <thead><tr>
+        <th class="shrink">Line</th><th>Name</th><th>Email</th>
+        <th>Company</th><th>State</th><th>Reason</th>
+      </tr></thead>
+      <tbody>
+      {% for r in preview.rows %}
+        <tr class="{% if not r.is_importable %}is-disabled{% endif %}">
+          <td class="text-xs muted tabular">{{ r.line }}</td>
+          <td class="text-sm">{{ r.data.first_name }} {{ r.data.last_name }}</td>
+          <td class="text-sm">{{ r.data.email }}</td>
+          <td class="text-sm">{{ r.data.company }}</td>
+          <td class="text-sm font-medium
+            {% if r.state == NEW %}s-SENT{% elif r.state == INVALID %}s-FAILED{% else %}s-ALREADY_MAILED{% endif %}">
+            {{ r.state }}
+          </td>
+          <td class="text-xs muted">{{ r.reason }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  {% if preview.importable %}
+    <form method="post" action="{% url 'crm:contact_import_confirm' %}">
+      {% csrf_token %}
+      <button type="submit" class="btn">Import {{ preview.importable|length }} contact(s)</button>
+    </form>
+  {% else %}
+    <p class="muted text-sm">Nothing importable in this file.</p>
+  {% endif %}
+{% endif %}
+{% endblock %}

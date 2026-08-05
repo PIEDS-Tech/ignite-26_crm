@@ -1,0 +1,35 @@
+{% extends "crm/base.html" %}
+{% block title %}Campaigns — Ignite CRM{% endblock %}
+{% block heading %}Campaigns{% endblock %}
+
+{% block content %}
+{% if is_lead %}
+  <div class="row-b mb-2">
+    <span></span>
+    <a class="btn" href="{% url 'crm:campaign_new' %}">New campaign</a>
+  </div>
+{% endif %}
+
+<div class="table-wrap">
+  <table class="table">
+    <thead><tr>
+      <th>Title</th><th>Subject</th><th>Status</th>
+      <th class="right shrink">Sent</th><th class="right shrink">Failed</th><th>Created</th>
+    </tr></thead>
+    <tbody>
+    {% for c in campaigns %}
+      <tr>
+        <td><a href="{% url 'crm:campaign_detail' c.pk %}">{{ c.title }}</a></td>
+        <td class="text-sm muted truncate" style="max-width:20rem">{{ c.mail_sub }}</td>
+        <td><span class="badge {% if c.status == 'active' %}badge-primary{% else %}badge-secondary{% endif %}">{{ c.status }}</span></td>
+        <td class="right tabular">{{ c.sent }}</td>
+        <td class="right tabular {% if c.failed %}s-FAILED{% endif %}">{{ c.failed }}</td>
+        <td class="text-sm muted">{{ c.created_at|date:"d M Y" }}</td>
+      </tr>
+    {% empty %}
+      <tr><td colspan="6" class="empty">No campaigns yet.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

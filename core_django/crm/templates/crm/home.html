@@ -1,0 +1,74 @@
+{% extends "crm/base.html" %}
+{% block title %}Dashboard — Ignite CRM{% endblock %}
+{% block heading %}Dashboard{% endblock %}
+
+{% block content %}
+<div class="grid grid-4 mb-3">
+  <div class="card"><section class="stat">
+    <div class="value">{{ my_contacts }}</div><div class="label">assigned to me</div>
+  </section></div>
+  <div class="card"><section class="stat">
+    <div class="value">{{ total_contacts }}</div><div class="label">contacts in pool</div>
+  </section></div>
+  <div class="card"><section class="stat">
+    <div class="value">{{ unassigned }}</div><div class="label">unassigned</div>
+  </section></div>
+  <div class="card"><section class="stat">
+    <div class="value">{{ sent_total }}</div><div class="label">mails sent</div>
+  </section></div>
+</div>
+
+<div class="card mb-3">
+  <header>
+    <h2>Campaigns</h2>
+    <p class="muted text-sm">Sent, drafted and failed per campaign.</p>
+  </header>
+  <section>
+    <div class="table-wrap">
+      <table class="table">
+        <thead><tr>
+          <th>Campaign</th><th>Status</th>
+          <th class="right shrink">Sent</th><th class="right shrink">Draft</th>
+          <th class="right shrink">Failed</th>
+        </tr></thead>
+        <tbody>
+        {% for c in funnels %}
+          <tr>
+            <td><a href="{% url 'crm:campaign_detail' c.pk %}">{{ c.title }}</a></td>
+            <td><span class="badge {% if c.status == 'active' %}badge-primary{% else %}badge-secondary{% endif %}">{{ c.status }}</span></td>
+            <td class="right tabular">{{ c.sent }}</td>
+            <td class="right tabular muted">{{ c.drafted }}</td>
+            <td class="right tabular {% if c.failed %}s-FAILED{% endif %}">{{ c.failed }}</td>
+          </tr>
+        {% empty %}
+          <tr><td colspan="5" class="empty">No campaigns yet.</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+</div>
+
+{% if recent_failures %}
+<div class="card">
+  <header><h2>Recent failures</h2></header>
+  <section>
+    <div class="table-wrap">
+      <table class="table">
+        <thead><tr><th>Contact</th><th>Campaign</th><th>By</th><th>Error</th></tr></thead>
+        <tbody>
+        {% for m in recent_failures %}
+          <tr>
+            <td><a href="{% url 'crm:contact_detail' m.contact.pk %}">{{ m.contact.email }}</a></td>
+            <td class="text-sm">{{ m.campaign.title }}</td>
+            <td class="text-sm muted">{{ m.sent_by.name }}</td>
+            <td class="text-sm s-FAILED truncate" style="max-width:22rem">{{ m.error_detail }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+</div>
+{% endif %}
+{% endblock %}
