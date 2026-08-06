@@ -50,6 +50,9 @@ Tests (needs Postgres up):
 cd core_django && ../.venv/bin/python manage.py runserver
 ```
 
+# 3. frontend agent — separate terminal, from the repo root
+.venv/bin/uvicorn local_agent.main:app --port 8111
+
 | Screen | Who |
 |---|---|
 | `/` dashboard — pool size, per-campaign funnel, recent failures | any member |
