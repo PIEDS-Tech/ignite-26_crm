@@ -13,6 +13,7 @@
     }
   </script>
   <script src="/static/basecoat/basecoat.js" defer></script>
+  <script src="/static/basecoat/poll.js" defer></script>
 </head>
 <body>
 <div class="main">
@@ -23,6 +24,7 @@
       <span class="text-sm muted">{{ profile.bits_email }} · batch {{ profile.batch }}</span>
       <span class="text-sm muted">·</span>
       <span class="text-sm muted" id="quota">{{ profile.sent_last_24h }}/{{ profile.daily_cap }} today</span>
+      <span class="text-xs muted" data-poll-stamp></span>
       <button type="button" class="btn-ghost btn-sm" onclick="toggleTheme()">◐</button>
     </div>
   </header>
@@ -56,10 +58,10 @@
         <table class="table">
           <thead><tr>
             <th class="shrink"><input type="checkbox" class="input-checkbox" id="selectAll"></th>
-            <th>Name</th><th>Company</th><th>Designation</th><th>Status</th>
+            <th>Name</th><th>Company</th><th>Stage</th><th>Status</th><th class="shrink"></th>
           </tr></thead>
           <tbody id="rows">
-            <tr><td colspan="5" class="empty">Pick a campaign to load your assigned contacts.</td></tr>
+            <tr><td colspan="6" class="empty">Pick a campaign to load your assigned contacts.</td></tr>
           </tbody>
         </table>
       </div>
@@ -78,6 +80,45 @@
     </div>
   </main>
 </div>
+
+<!-- Inline contact editor. The point is narrow: fix a wrong designation or a
+     misspelt first name BEFORE it gets rendered into a real mail. -->
+<dialog id="editDlg" class="dialog">
+  <article style="min-width:min(28rem,90vw)">
+    <header>
+      <h2>Edit contact</h2>
+      <p class="text-xs muted">Saves to the shared CRM — the whole team sees it.</p>
+    </header>
+    <section class="col">
+      <input type="hidden" id="e-id">
+      <div class="col" style="gap:.3rem">
+        <label class="label text-xs" for="e-first_name">First name</label>
+        <input class="input" id="e-first_name">
+      </div>
+      <div class="col" style="gap:.3rem">
+        <label class="label text-xs" for="e-last_name">Last name</label>
+        <input class="input" id="e-last_name">
+      </div>
+      <div class="col" style="gap:.3rem">
+        <label class="label text-xs" for="e-company">Company</label>
+        <input class="input" id="e-company">
+      </div>
+      <div class="col" style="gap:.3rem">
+        <label class="label text-xs" for="e-designation">Designation</label>
+        <input class="input" id="e-designation">
+      </div>
+      <div class="col" style="gap:.3rem">
+        <label class="label text-xs" for="e-tags">Tags</label>
+        <input class="input" id="e-tags" placeholder="comma-separated">
+      </div>
+      <p class="text-xs s-FAILED" id="e-error"></p>
+    </section>
+    <footer class="row">
+      <button class="btn" onclick="saveEdit()">Save</button>
+      <button class="btn-ghost" onclick="closeEdit()">Cancel</button>
+    </footer>
+  </article>
+</dialog>
 
 <div id="toaster" class="toaster"></div>
 
@@ -120,25 +161,95 @@ async function loadCampaigns() {
   }
 }
 
+const esc = s => String(s ?? '').replace(/[&<>"']/g,
+  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+//: Last payload from /api/contacts, keyed by id -- the edit dialog prefills
+//: from this rather than making a second round trip per row.
+let contactsById = {};
+
 async function loadContacts() {
   const id = $('campaign').value;
-  $('sendBtn').disabled = true;
   $('preflightBtn').disabled = !id;
   if (!id) return;
 
+  // A background refresh must not wipe a selection someone is mid-way through
+  // building, nor the per-row statuses from the last send.
+  const keep = new Set(chosen());
+
   const list = await req('/api/contacts?campaign_id=' + id);
+  contactsById = Object.fromEntries(list.map(c => [c.id, c]));
+
   $('rows').innerHTML = list.map(c => `
     <tr class="${c.already_mailed ? 'is-disabled' : ''}">
-      <td><input type="checkbox" class="input-checkbox pick" value="${c.id}" ${c.already_mailed ? 'disabled' : ''}></td>
-      <td>${c.name}<div class="text-xs muted">${c.email}</div></td>
-      <td class="text-sm">${c.company}</td>
-      <td class="text-sm muted">${c.designation || '—'}</td>
+      <td><input type="checkbox" class="input-checkbox pick" value="${c.id}"
+                 ${c.already_mailed ? 'disabled' : ''} ${keep.has(c.id) ? 'checked' : ''}></td>
+      <td>${esc(c.name)}<div class="text-xs muted">${esc(c.email)}</div></td>
+      <td class="text-sm">${esc(c.company)}
+        <div class="text-xs muted">${esc(c.designation) || '—'}</div>
+        <div class="text-xs">${(c.tags || []).map(t => `<span class="badge badge-secondary">${esc(t)}</span>`).join('')}</div>
+      </td>
+      <td><span class="badge lc-${esc(c.lifecycle)}">${esc(c.lifecycle_label)}</span></td>
       <td id="s-${c.id}" class="text-xs muted">${c.already_mailed ? 'already mailed' : ''}</td>
+      <td><button type="button" class="btn-ghost btn-sm" onclick="openEdit('${c.id}')"
+                  title="Edit before sending">&#9998;</button></td>
     </tr>`).join('') ||
-    '<tr><td colspan="5" class="empty">No contacts assigned to you.</td></tr>';
+    '<tr><td colspan="6" class="empty">No contacts assigned to you.</td></tr>';
 
-  picks().forEach(p => p.addEventListener('change', sync));
   sync();
+}
+
+async function refreshQuota() {
+  // The header value is rendered once at server startup and would otherwise be
+  // wrong for the whole process lifetime.
+  try {
+    const me = await req('/api/me');
+    $('quota').textContent = `${me.sent_last_24h}/${me.daily_cap} today`;
+  } catch (e) { /* leave the last known value */ }
+}
+
+// ---- inline edit ---------------------------------------------------------
+
+function openEdit(id) {
+  const c = contactsById[id];
+  if (!c) return;
+  Poll.pause();                       // never let a refresh wipe open fields
+  $('e-id').value = id;
+  $('e-error').textContent = '';
+  ['first_name', 'last_name', 'company', 'designation'].forEach(f => {
+    $('e-' + f).value = c[f] || '';
+  });
+  $('e-tags').value = (c.tags || []).join(', ');
+  $('editDlg').showModal();
+}
+
+function closeEdit() {
+  $('editDlg').close();
+  Poll.resume();
+}
+
+async function saveEdit() {
+  const id = $('e-id').value;
+  const body = {
+    first_name: $('e-first_name').value.trim(),
+    last_name:  $('e-last_name').value.trim(),
+    company:    $('e-company').value.trim(),
+    designation: $('e-designation').value.trim(),
+    tags: $('e-tags').value.split(',').map(t => t.trim()).filter(Boolean),
+  };
+  try {
+    await req('/api/contacts/' + id, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+  } catch (e) {
+    // A 403 here means the contact was reassigned while this page was open.
+    $('e-error').textContent = e.message;
+    return;
+  }
+  closeEdit();
+  await loadContacts();
 }
 
 function sync() {
@@ -146,6 +257,8 @@ function sync() {
   $('count').textContent = n;
   picks().forEach(p => p.closest('tr').classList.toggle('is-selected', p.checked));
   $('preflightBtn').disabled = n === 0;
+  // Send stays locked until a preflight has actually vouched for the selection.
+  if (n === 0) $('sendBtn').disabled = true;
 }
 
 async function verifyAuth() {
@@ -185,32 +298,43 @@ async function send() {
   const ids = chosen();
   if (!confirm(`Send to ${ids.length} contact(s)? This mails real people.`)) return;
   $('sendBtn').disabled = true;
+  // The NDJSON stream below writes per-row statuses as it goes; a background
+  // refresh mid-stream would rebuild the table underneath it.
+  Poll.pause();
 
-  const r = await fetch('/api/send', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ campaign_id: $('campaign').value, contact_ids: ids }),
-  });
-  if (!r.ok) {
-    const d = await r.json().catch(() => ({}));
-    $('sendBtn').disabled = false;
-    return alert(d.detail || 'Send failed');
-  }
-
-  // Results stream back as newline-delimited JSON, one line per contact.
-  const reader = r.body.getReader(), decoder = new TextDecoder();
-  let buffer = '';
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split('\n');
-    buffer = lines.pop();
-    for (const line of lines.filter(Boolean)) {
-      const o = JSON.parse(line);
-      setStatus(o.contact_id, o.status, o.detail);
+  try {
+    const r = await fetch('/api/send', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ campaign_id: $('campaign').value, contact_ids: ids }),
+    });
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      $('sendBtn').disabled = false;
+      return alert(d.detail || 'Send failed');
     }
+
+    // Results stream back as newline-delimited JSON, one line per contact.
+    const reader = r.body.getReader(), decoder = new TextDecoder();
+    let buffer = '';
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n');
+      buffer = lines.pop();
+      for (const line of lines.filter(Boolean)) {
+        const o = JSON.parse(line);
+        setStatus(o.contact_id, o.status, o.detail);
+      }
+    }
+  } finally {
+    // Always resumes, including on an aborted stream -- a permanently paused
+    // poll would silently stop the page updating for the rest of the session.
+    Poll.resume();
   }
+
   await loadContacts();
+  await refreshQuota();
 }
 
 async function reconcile() {
@@ -227,8 +351,21 @@ $('selectAll').addEventListener('change', e => {
   picks().filter(p => !p.disabled).forEach(p => p.checked = e.target.checked);
   sync();
 });
+// Delegated: loadContacts() replaces every row, taking direct listeners with it.
+document.addEventListener('change', e => { if (e.target.matches('.pick')) sync(); });
 $('campaign').addEventListener('change', loadContacts);
+$('editDlg').addEventListener('cancel', () => Poll.resume());   // Esc key
+
 loadCampaigns();
+
+// Someone else's edit in the CRM shows up here within 20s, without a reload.
+window.addEventListener('load', () => {
+  Poll.every(async () => {
+    if (!$('campaign').value) return;
+    await loadContacts();
+    await refreshQuota();
+  });
+});
 </script>
 </body>
 </html>

@@ -2,6 +2,20 @@
 {% block title %}{{ contact.full_name }} — Ignite CRM{% endblock %}
 {% block heading %}{{ contact.full_name }}{% endblock %}
 
+{% block actions %}
+  {% if can_edit %}
+    <a class="btn btn-sm" href="{% url 'crm:contact_edit' contact.pk %}">Edit</a>
+    <form method="post" action="{% url 'crm:contact_archive' contact.pk %}">
+      {% csrf_token %}
+      <input type="hidden" name="archived" value="{% if contact.is_archived %}0{% else %}1{% endif %}">
+      <input type="hidden" name="next" value="{{ request.path }}">
+      <button type="submit" class="btn-outline btn-sm">
+        {% if contact.is_archived %}Restore{% else %}Archive{% endif %}
+      </button>
+    </form>
+  {% endif %}
+{% endblock %}
+
 {% block content %}
 <div class="split">
   <div class="col">
@@ -56,11 +70,58 @@
         </div>
       </section>
     </div>
+
+    <div class="card">
+      <header>
+        <h2>Change history</h2>
+        <p class="text-xs muted">Everyone edits the same pool — this is who changed what.</p>
+      </header>
+      <section>
+        <div class="table-wrap">
+          <table class="table">
+            <thead><tr><th>When</th><th>Who</th><th>Field</th><th>Change</th></tr></thead>
+            <tbody>
+            {% for a in audits %}
+              <tr>
+                <td class="text-xs muted">{{ a.created_at|date:"d M Y H:i" }}</td>
+                <td class="text-sm">{{ a.actor.name|default:"—" }}</td>
+                <td class="text-sm font-mono">{{ a.field }}</td>
+                <td class="text-xs">
+                  {% if a.old_value %}<span class="muted">{{ a.old_value|truncatechars:40 }}</span> →{% endif %}
+                  {{ a.new_value|truncatechars:40|default:"(blank)" }}
+                </td>
+              </tr>
+            {% empty %}
+              <tr><td colspan="4" class="empty">Never edited.</td></tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
   </div>
 
   <div class="card sticky">
     <header><h2>Details</h2></header>
     <section class="col text-sm">
+      <div>
+        <span class="muted">Stage</span><br>
+        <span class="badge lc-{{ contact.lifecycle }}">{{ contact.get_lifecycle_display }}</span>
+        {% if contact.is_archived %}<span class="badge">archived</span>{% endif %}
+      </div>
+      <div>
+        <span class="muted">Tags</span><br>
+        {% for t in contact.tags %}<span class="badge badge-secondary">{{ t }}</span>{% empty %}
+          <span class="muted">none</span>{% endfor %}
+      </div>
+      {% if not contact.is_mailable %}
+        <div class="alert alert-destructive"><section><p class="text-xs">
+          This contact will not receive mail
+          {% if contact.is_archived %}— it is archived{% else %}— it is marked
+          {{ contact.get_lifecycle_display|lower }}{% endif %}.
+        </p></section></div>
+      {% endif %}
+      <hr>
       <div><span class="muted">Email</span><br>{{ contact.email }}</div>
       <div><span class="muted">Company</span><br>{{ contact.company }}</div>
       <div><span class="muted">Designation</span><br>{{ contact.designation|default:"—" }}</div>
@@ -78,6 +139,25 @@
           {{ contact.last_contacted_at|date:"d M Y H:i" }} by {{ contact.last_contacted_by.name }}
         {% else %}never{% endif %}
       </div>
+      {% if contact.created_by %}
+        <div class="text-xs muted">Added by {{ contact.created_by.name }} on
+          {{ contact.created_at|date:"d M Y" }}</div>
+      {% endif %}
+
+      {% if is_lead %}
+        <hr>
+        {% if can_delete %}
+          <form method="post" action="{% url 'crm:contact_delete' contact.pk %}"
+                onsubmit="return confirm('Permanently delete {{ contact.email|escapejs }}? This cannot be undone.')">
+            {% csrf_token %}
+            <button type="submit" class="btn-outline btn-sm s-FAILED">Delete permanently</button>
+          </form>
+          <p class="text-xs muted">Never mailed, so deleting destroys no history.</p>
+        {% else %}
+          <p class="text-xs muted">This contact has been mailed, so it cannot be
+            deleted — that would destroy the record of what we sent. Archive it instead.</p>
+        {% endif %}
+      {% endif %}
     </section>
   </div>
 </div>

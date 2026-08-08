@@ -1,18 +1,25 @@
 from django.contrib import messages
-from django.core.exceptions import ValidationError
+from django.core.exceptions import PermissionDenied, ValidationError
 from django.core.paginator import Paginator
 from django.db.models import Count, Q
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from django.views.decorators.http import require_POST
 
-from shared.enums import CampaignStatus, MailingStatus
+from shared.enums import CampaignStatus, ContactLifecycle, MailingStatus
 
-from .forms import CampaignForm, CsvUploadForm, NoteForm, TokenForm
+from .forms import BulkEditForm, CampaignForm, ContactForm, CsvUploadForm, NoteForm, TokenForm
 from .models import ApiToken, Campaign, CampaignMailing, Contact, TeamMember
 from .services import assignment, importer
 from .services import campaigns as campaign_svc
-from .services.permissions import is_lead, lead_required, member_required
+from .services import contacts as contact_svc
+from .services.permissions import (
+    can_edit_contact,
+    can_hard_delete,
+    is_lead,
+    lead_required,
+    member_required,
+)
 from .services.render import MissingVariables
 from .services.render import render as render_mail   # not django.shortcuts.render
 
@@ -61,6 +68,13 @@ def _filtered_contacts(request):
     q = request.GET.get("q", "").strip()
     company = request.GET.get("company", "").strip()
     assignee = request.GET.get("assignee", "").strip()
+    tag = request.GET.get("tag", "").strip()
+    lifecycle = request.GET.get("lifecycle", "").strip()
+    archived = request.GET.get("archived", "").strip()
+
+    # Archived contacts are hidden everywhere unless explicitly asked for. They
+    # are also refused by claim_batch, so this is presentation, not safety.
+    qs = qs.filter(is_archived=True) if archived == "1" else qs.filter(is_archived=False)
 
     if q:
         qs = qs.filter(
@@ -69,6 +83,10 @@ def _filtered_contacts(request):
         )
     if company:
         qs = qs.filter(company=company)
+    if tag:
+        qs = qs.filter(tags__contains=[tag])
+    if lifecycle:
+        qs = qs.filter(lifecycle=lifecycle)
     if assignee == "unassigned":
         qs = qs.filter(assigned_to__isnull=True)
     elif assignee == "mine":
@@ -76,15 +94,20 @@ def _filtered_contacts(request):
     elif assignee:
         qs = qs.filter(assigned_to_id=assignee)
 
-    return qs, {"q": q, "company": company, "assignee": assignee}
+    return qs, {
+        "q": q, "company": company, "assignee": assignee,
+        "tag": tag, "lifecycle": lifecycle, "archived": archived,
+    }
 
 
 def _filter_context(request):
     qs, filters = _filtered_contacts(request)
     return qs, {
         "filters": filters,
-        "companies": Contact.objects.order_by("company")
+        "companies": Contact.objects.filter(is_archived=False).order_by("company")
                             .values_list("company", flat=True).distinct(),
+        "all_tags": contact_svc.all_tags(),
+        "lifecycles": ContactLifecycle.choices(),
         "members": TeamMember.objects.filter(is_active=True)
                            .annotate(load=Count("assigned_contacts")),
     }
@@ -94,7 +117,13 @@ def _filter_context(request):
 def contact_list(request):
     qs, ctx = _filter_context(request)
     page = Paginator(qs, 50).get_page(request.GET.get("page"))
-    return render(request, "crm/contact_list.html", _base(request, page=page, total=qs.count(), **ctx))
+    return render(request, "crm/contact_list.html", _base(
+        request,
+        page=page,
+        total=qs.count(),
+        bulk_form=BulkEditForm(actor=request.member),
+        **ctx,
+    ))
 
 
 @member_required
@@ -121,7 +150,136 @@ def contact_detail(request, pk):
         form=form,
         notes=contact.notes.select_related("author"),
         mailings=contact.mailings.select_related("campaign", "sent_by"),
+        audits=contact.audits.select_related("actor")[:50],
+        can_edit=can_edit_contact(request.member, contact),
+        can_delete=can_hard_delete(request.member, contact),
     ))
+
+
+# ------------------------------------------------------------- contact CRUD
+# @member_required, not @lead_required: a 2025 member may edit the contacts
+# assigned to them. The per-object check is inside, via can_edit_contact.
+
+@member_required
+def contact_new(request):
+    if request.method == "POST":
+        form = ContactForm(request.POST, actor=request.member)
+        if form.is_valid():
+            data = dict(form.cleaned_data)
+            data["tags"] = data.pop("tags_raw")
+            try:
+                contact = contact_svc.create(data, request.member)
+            except ValidationError as exc:
+                messages.error(request, "; ".join(exc.messages))
+            else:
+                messages.success(request, f"Added {contact.full_name}.")
+                return redirect("crm:contact_detail", pk=contact.pk)
+    else:
+        form = ContactForm(actor=request.member)
+
+    return render(request, "crm/contact_form.html", _base(request, form=form, contact=None))
+
+
+@member_required
+def contact_edit(request, pk):
+    contact = get_object_or_404(Contact, pk=pk)
+    if not can_edit_contact(request.member, contact):
+        raise PermissionDenied(
+            "You can only edit contacts assigned to you. Ask a lead to reassign it."
+        )
+
+    if request.method == "POST":
+        form = ContactForm(request.POST, instance=contact, actor=request.member)
+        if form.is_valid():
+            data = dict(form.cleaned_data)
+            data["tags"] = data.pop("tags_raw")
+            try:
+                contact_svc.update(contact, data, request.member)
+            except (ValidationError, PermissionDenied) as exc:
+                messages.error(request, "; ".join(getattr(exc, "messages", [str(exc)])))
+            else:
+                messages.success(request, "Saved.")
+                return redirect("crm:contact_detail", pk=contact.pk)
+    else:
+        form = ContactForm(instance=contact, actor=request.member)
+
+    return render(request, "crm/contact_form.html", _base(request, form=form, contact=contact))
+
+
+@member_required
+@require_POST
+def contact_archive(request, pk):
+    contact = get_object_or_404(Contact, pk=pk)
+    archive = request.POST.get("archived") != "0"
+    try:
+        contact_svc.set_archived(contact, request.member, archived=archive)
+    except PermissionDenied as exc:
+        messages.error(request, str(exc))
+    else:
+        messages.success(
+            request,
+            f"{contact.full_name} archived — it will no longer receive mail."
+            if archive else f"{contact.full_name} restored.",
+        )
+    return redirect(request.POST.get("next") or "crm:contact_list")
+
+
+@lead_required
+@require_POST
+def contact_delete(request, pk):
+    contact = get_object_or_404(Contact, pk=pk)
+    try:
+        email = contact_svc.hard_delete(contact, request.member)
+    except ValidationError as exc:
+        messages.error(request, "; ".join(exc.messages))
+        return redirect("crm:contact_detail", pk=pk)
+    except PermissionDenied as exc:
+        messages.error(request, str(exc))
+        return redirect("crm:contact_detail", pk=pk)
+
+    messages.success(request, f"Deleted {email} permanently.")
+    return redirect("crm:contact_list")
+
+
+@member_required
+@require_POST
+def contact_bulk_edit(request):
+    contact_ids = request.POST.getlist("contact_ids")
+    redirect_to = request.POST.get("next") or "crm:contact_list"
+
+    if not contact_ids:
+        messages.error(request, "No contacts selected.")
+        return redirect(redirect_to)
+
+    form = BulkEditForm(request.POST, actor=request.member)
+    if not form.is_valid():
+        messages.error(request, "Check the bulk-edit fields.")
+        return redirect(redirect_to)
+
+    try:
+        result = contact_svc.bulk_edit(
+            contact_ids,
+            request.member,
+            company=form.cleaned_data.get("company"),
+            designation=form.cleaned_data.get("designation"),
+            tags_add=form.cleaned_data.get("tags_add"),
+            tags_remove=form.cleaned_data.get("tags_remove"),
+            lifecycle=form.cleaned_data.get("lifecycle"),
+        )
+    except PermissionDenied as exc:
+        messages.error(request, str(exc))
+        return redirect(redirect_to)
+
+    if result.updated:
+        messages.success(request, f"Updated {result.updated} contact(s).")
+    if result.skipped:
+        messages.error(
+            request,
+            f"Skipped {len(result.skipped)} not assigned to you.",
+        )
+    if not result.updated and not result.skipped:
+        messages.info(request, "Nothing to change — the values already matched.")
+    return redirect(redirect_to)
 
 
 # --------------------------------------------------------------- assignment
@@ -209,7 +367,9 @@ def contact_import_confirm(request):
         messages.error(request, "Nothing pending — upload the file again.")
         return redirect("crm:contact_import")
 
-    created = Contact.objects.bulk_create([Contact(**data) for data in rows])
+    created = Contact.objects.bulk_create(
+        [Contact(**data, created_by=request.member) for data in rows]
+    )
     messages.success(request, f"Imported {len(created)} contact(s).")
     return redirect("crm:contact_list")
 

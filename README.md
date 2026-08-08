@@ -9,10 +9,10 @@ Two apps, one database, one visual language:
   database credentials.
 
 ```
-   laptop                            DigitalOcean
+   laptop                            hosted
 ┌───────────────┐                ┌──────────────────┐
-│ FastAPI agent │──HTTPS/Token──→ │ Django CRM       │──→ Postgres
-│  + Gmail OAuth│                │  claim / report  │
+│ FastAPI agent │──HTTPS/Token──→ │ Django CRM       │──→ Supabase Postgres
+│  + Gmail OAuth│                │  claim / report  │      (the master)
 └───────┬───────┘                └──────────────────┘
         └──→ Gmail API (the member's own credentials, local only)
 ```
@@ -23,6 +23,50 @@ Two apps, one database, one visual language:
 mailed twice for the same campaign — no matter how many times someone presses
 send, how many members race, or where a crash lands. Everything else is
 convenience.
+
+## Who can do what
+
+Defined once, in `shared/enums.py::LEAD_BATCH` and `services/permissions.py`.
+
+| | batch 2024 (lead) | batch 2025 |
+|---|---|---|
+| See the whole pool | ✅ | ✅ |
+| Edit / archive a contact | anyone's | **only their own assigned** |
+| Add a contact | assigns to anyone | assigns to themselves |
+| Bulk edit | anyone's | only their own |
+| Delete permanently | ✅ (never-mailed only) | ❌ |
+| Set `lifecycle` by hand | ✅ | ❌ — the server moves it |
+| Assign contacts, campaigns, tokens | ✅ | ❌ |
+| Send mail | ✅ | ✅ |
+
+Both batches edit from either surface: full forms in the Django CRM, and an
+inline row editor in the local agent for fixing a detail just before sending.
+
+## Lifecycle and tags
+
+Two separate things, deliberately:
+
+- **`lifecycle`** is server-owned: `new → contacted → replied / bounced /
+  do_not_contact`. The only automatic transition is `new → contacted`, applied in
+  `record_result()` the instant a send is confirmed — this is what "changes the
+  moment they mail" means. It is scoped so a later campaign can never drag a
+  contact marked `replied` backwards.
+- **`tags`** are free-form (`fintech`, `priority`, `iit-b`), lowercased and
+  de-duplicated on the way in, editable by a lead or by the assigned owner.
+
+`do_not_contact`, `bounced` and archived contacts are **refused by
+`claim_batch`**, not merely hidden from a list. Preflight reports the same
+refusal, from the same helper, so the dry run cannot disagree with the real thing.
+
+Every field change writes a `ContactAudit` row naming the actor — with fifteen
+people editing one pool, "who changed this" has to be answerable.
+
+## Staying in sync
+
+Both apps poll every 20 seconds and on tab focus (`shared/static/basecoat/poll.js`),
+so someone else's edit lands in your open tab without a reload. Polling pauses
+during a send and while an edit dialog is open, and preserves checkbox
+selections across a refresh.
 
 ## Setup
 
@@ -56,7 +100,9 @@ cd core_django && ../.venv/bin/python manage.py runserver
 | Screen | Who |
 |---|---|
 | `/` dashboard — pool size, per-campaign funnel, recent failures | any member |
-| `/contacts/` searchable list · `/contacts/<id>/` history + notes | any member |
+| `/contacts/` searchable list, filter by tag/stage, bulk edit | any member |
+| `/contacts/<id>/` history, notes, change log | any member |
+| `/contacts/new` · `/contacts/<id>/edit` | any member (own contacts only) |
 | `/campaigns/` list · detail with live preview and funnel | any member |
 | `/assign/` bulk-assign contacts to members | **leads (batch 2024)** |
 | `/contacts/import/` CSV upload → preview → commit | **leads** |
@@ -117,8 +163,9 @@ All endpoints take `Authorization: Token <key>` and live under `/api/v1/`.
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /me` | identity handshake |
+| `GET /me` | identity handshake, live quota |
 | `GET /campaigns` · `GET /contacts?campaign_id=` | what can be sent, to whom |
+| `POST /contacts` · `PATCH /contacts/<id>` | add / edit, scoped to the caller |
 | `POST /mailings/preflight` | dry run, writes nothing |
 | `POST /mailings/claim` | reserve DRAFTs, returns rendered mail |
 | `POST /mailings/<id>/result` | record sent/failed |
@@ -137,6 +184,66 @@ the server.
 (dialog, select, dropdown, toast, tabs) and `app.css` — a small hand-written
 layout layer, because Basecoat ships components but deliberately no Tailwind
 utilities. See `VENDORED.md` there for provenance.
+
+## Supabase — the master database
+
+Supabase replaces the Docker Postgres. It changes nothing about the
+architecture: Django remains the only process that connects to it, and laptops
+still hold no database credentials.
+
+### Use the session pooler
+
+From **Project Settings → Database → Connection string → Session pooler**:
+
+```
+postgres://postgres.<ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres?sslmode=require
+```
+
+Three ways to get this wrong, in order of how much they hurt:
+
+| Don't | Why |
+|---|---|
+| Port **6543** (transaction pooler) | `services/mailing.py` and `assignment.py` depend on `SELECT … FOR UPDATE`; psycopg3's prepared statements break there. If you must, set `DB_TRANSACTION_POOLER=True`. |
+| `db.<ref>.supabase.co` direct | IPv6-only without the paid IPv4 add-on. |
+| Omitting `sslmode=require` | The token and every contact travel the public internet. |
+
+### Cutover
+
+```bash
+# 1. build the schema on the far side
+DATABASE_URL="<supabase-session-pooler-url>" ../.venv/bin/python manage.py migrate
+
+# 2. VERIFY IT — migrations "succeeding" is not proof the constraint landed
+DATABASE_URL="<supabase-session-pooler-url>" ../.venv/bin/python manage.py check_db
+
+# 3. move existing data
+pg_dump --data-only --no-owner "postgres://ignite:ignite@localhost:5432/ignite_crm" \
+  | psql "<supabase-session-pooler-url>"
+```
+
+`check_db` asserts `uniq_campaign_contact` exists, that `SELECT … FOR UPDATE`
+actually works over this connection, and that you are not on the transaction
+pooler. Run it after every migration against a new host. Step 2 is not optional —
+the entire no-double-mail guarantee is that one index.
+
+### RLS
+
+Django connects as `postgres`, which **bypasses RLS**. That is deliberate: Django
+is the only client, and permissions are enforced in `services/permissions.py`.
+Two consequences to respect — never expose the Supabase `anon` or `service_role`
+keys to any frontend, and do not add a second direct-to-Postgres client without
+revisiting this decision.
+
+### Tests never touch it
+
+`config/settings.py` forces the local Docker Postgres whenever pytest is running,
+regardless of `DATABASE_URL`. Django's test runner drops its database; pointing
+that at production would be unrecoverable. The pytest header prints which host
+it chose, so you can see the guard engaged:
+
+```
+ignite: tests pinned to localhost:5432/ignite_crm (never the hosted database)
+```
 
 ## Deploying to DigitalOcean
 
@@ -166,20 +273,22 @@ The agent has no models to keep in sync; it only speaks JSON.
 ```
 core_django/crm/
   models.py                  canonical schema — the unique constraint lives here
-  services/mailing.py        claim/report — the safety core
+  services/mailing.py        claim/report — the safety core, + the lifecycle flip
+  services/contacts.py       every contact mutation, + the audit trail
   services/render.py         {{ var }} substitution, refuses on blanks
-  services/permissions.py    the single definition of "is a lead"
+  services/permissions.py    who is a lead, and who may edit which contact
   services/campaigns.py      status transitions + template validation
   services/assignment.py     bulk assign, with the reassign guard
   services/importer.py       CSV parse → validate → commit
-  api/                       token auth + the seven JSON endpoints
+  api/                       token auth + the JSON endpoints
+  management/commands/check_db.py   proves the live DB enforces what we assume
   templates/crm/             every screen
-  tests/                     32 tests, incl. the idempotency proof
+  tests/                     65 tests, incl. the idempotency proof
 local_agent/
   api_client.py              httpx wrapper — the agent's only link to the CRM
   services/send.py           claim → send → report
   gmail/client.py            OAuth, token storage, identity binding
 shared/
-  enums.py                   status strings + LEAD_BATCH
-  static/basecoat/           the shared UI kit
+  enums.py                   status strings, ContactLifecycle, LEAD_BATCH
+  static/basecoat/           the shared UI kit + poll.js
 ```

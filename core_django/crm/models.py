@@ -1,9 +1,9 @@
 """Canonical schema for Ignite CRM.
 
-This module is the SINGLE SOURCE OF TRUTH for the database. The FastAPI local
-agent mirrors these tables in `local_agent/db/models.py` via SQLAlchemy and
-never runs migrations of its own -- it verifies at startup that its mirror
-still matches what lives here.
+This module is the SINGLE SOURCE OF TRUTH for the database, and Django is the
+only process that ever connects to it. The FastAPI local agent holds no models
+and no credentials -- it reaches this data exclusively over the HTTP API in
+`crm/api/`, which is what lets members run it on their own laptops.
 """
 
 import hashlib
@@ -11,10 +11,17 @@ import secrets
 import uuid
 
 from django.conf import settings
+from django.contrib.postgres.fields import ArrayField
+from django.contrib.postgres.indexes import GinIndex
 from django.db import models
 from django.utils import timezone
 
-from shared.enums import CampaignStatus, MailingStatus
+from shared.enums import (
+    BLOCKED_LIFECYCLES,
+    CampaignStatus,
+    ContactLifecycle,
+    MailingStatus,
+)
 
 from .validators import batch_validator, phone_validator, validate_bits_email
 
@@ -141,10 +148,46 @@ class Contact(TimeStampedModel):
     )
     last_contacted_at = models.DateTimeField(null=True, blank=True)
 
+    # --- funnel state -----------------------------------------------------
+    # SERVER-OWNED. Only services/mailing.py and a lead may write this; the
+    # contact form drops the field entirely for non-leads.
+    lifecycle = models.CharField(
+        max_length=16,
+        choices=ContactLifecycle.choices(),
+        default=ContactLifecycle.NEW.value,
+        db_index=True,
+        help_text="Flips to 'contacted' automatically on the first sent mail.",
+    )
+
+    # Free-form, editable by a lead or by the member the contact is assigned to.
+    # A real Postgres array, so `tags__contains=["fintech"]` uses the GIN index.
+    tags = ArrayField(
+        models.CharField(max_length=40),
+        default=list,
+        blank=True,
+        help_text="Free-form labels, e.g. fintech, priority, iit-b.",
+    )
+
+    # Archive rather than delete: CampaignMailing.contact is PROTECT, so any
+    # contact that has ever been mailed cannot be removed from the table at all.
+    is_archived = models.BooleanField(default=False, db_index=True)
+    archived_at = models.DateTimeField(null=True, blank=True)
+    archived_by = models.ForeignKey(
+        TeamMember, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+
+    created_by = models.ForeignKey(
+        TeamMember, on_delete=models.SET_NULL, null=True, blank=True, related_name="+"
+    )
+
     class Meta:
         db_table = "contacts"
         ordering = ["company", "first_name"]
-        indexes = [models.Index(fields=["assigned_to", "company"])]
+        indexes = [
+            models.Index(fields=["assigned_to", "company"]),
+            models.Index(fields=["is_archived", "lifecycle"]),
+            GinIndex(fields=["tags"], name="contacts_tags_gin"),
+        ]
 
     def __str__(self):
         return f"{self.full_name} @ {self.company}"
@@ -152,6 +195,15 @@ class Contact(TimeStampedModel):
     @property
     def full_name(self):
         return f"{self.first_name} {self.last_name}".strip()
+
+    @property
+    def is_mailable(self) -> bool:
+        """Whether this contact may receive mail at all.
+
+        Advisory only -- the binding check is in services/mailing.py::claim_batch,
+        which re-tests this under a row lock. Use this for UI, never for safety.
+        """
+        return not self.is_archived and self.lifecycle not in BLOCKED_LIFECYCLES
 
 
 class ContactNote(TimeStampedModel):
@@ -171,6 +223,30 @@ class ContactNote(TimeStampedModel):
 
     def __str__(self):
         return f"Note on {self.contact_id} by {self.author_id}"
+
+
+class ContactAudit(TimeStampedModel):
+    """One row per field changed on a contact.
+
+    Fifteen people now edit one shared pool from two different apps. Without
+    this, "who changed this company name and when" is unanswerable, and a bad
+    bulk edit is impossible to unpick. Written only by services/contacts.py, so
+    a new view cannot mutate a contact without leaving a trace.
+    """
+
+    contact = models.ForeignKey(Contact, on_delete=models.CASCADE, related_name="audits")
+    actor = models.ForeignKey(TeamMember, on_delete=models.SET_NULL, null=True, related_name="+")
+    field = models.CharField(max_length=40)
+    old_value = models.TextField(blank=True)
+    new_value = models.TextField(blank=True)
+
+    class Meta:
+        db_table = "contact_audits"
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["contact", "-created_at"])]
+
+    def __str__(self):
+        return f"{self.field}: {self.old_value!r} -> {self.new_value!r}"
 
 
 class Campaign(TimeStampedModel):

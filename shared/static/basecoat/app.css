@@ -136,6 +136,24 @@ td.shrink, th.shrink { width: 1%; white-space: nowrap }
 .s-NOT_ASSIGNED,
 .s-MISSING_VARS,
 .s-CAP_REACHED          { color: #b45309 }
+.s-ARCHIVED,
+.s-BLOCKED              { color: var(--color-destructive) }
+
+/* ---------- contact lifecycle badges ---------- */
+/* Colour carries meaning here: the two reds are the states that refuse mail. */
+
+.badge.lc-new             { background: transparent; border-color: var(--color-border); color: var(--color-muted-foreground) }
+.badge.lc-contacted       { background: #dbeafe; border-color: #93c5fd; color: #1e40af }
+.badge.lc-replied         { background: #dcfce7; border-color: #86efac; color: #166534 }
+.badge.lc-bounced         { background: #fee2e2; border-color: #fca5a5; color: #991b1b }
+.badge.lc-do_not_contact  { background: #fee2e2; border-color: #ef4444; color: #7f1d1d; font-weight: 600 }
+
+@media (prefers-color-scheme: dark) {
+  .badge.lc-contacted      { background: #1e3a8a33; border-color: #1e40af; color: #93c5fd }
+  .badge.lc-replied        { background: #14532d33; border-color: #166534; color: #86efac }
+  .badge.lc-bounced,
+  .badge.lc-do_not_contact { background: #7f1d1d33; border-color: #991b1b; color: #fca5a5 }
+}
 
 /* ---------- misc ---------- */
 

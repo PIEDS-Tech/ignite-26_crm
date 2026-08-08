@@ -14,9 +14,15 @@ from django.db import transaction
 
 from crm.models import Contact
 
+from .contacts import clean_tags
+
 REQUIRED_COLUMNS = {"first_name", "email", "company"}
-OPTIONAL_COLUMNS = {"last_name", "phone_no", "linkedin", "designation"}
+OPTIONAL_COLUMNS = {"last_name", "phone_no", "linkedin", "designation", "tags"}
 KNOWN_COLUMNS = REQUIRED_COLUMNS | OPTIONAL_COLUMNS
+
+#: Tags are semicolon-separated inside their cell, because a CSV comma would
+#: split them into columns.
+TAG_SEPARATOR = ";"
 
 NEW = "new"
 DUPLICATE = "duplicate"
@@ -98,6 +104,8 @@ def parse(file_bytes: bytes) -> ImportPreview:
         }
         email = data["email"].lower()
         data["email"] = email
+        # ArrayField wants a list, not the raw cell text.
+        data["tags"] = clean_tags(data["tags"].replace(TAG_SEPARATOR, ","))
 
         if not email:
             preview.rows.append(Row(line, data, INVALID, "email is blank"))

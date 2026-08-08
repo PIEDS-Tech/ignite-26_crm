@@ -3,6 +3,9 @@
 {% block heading %}Dashboard{% endblock %}
 
 {% block content %}
+{# One stable [data-poll] wrapper: the failures card below is conditional, and
+   a container count that changes between loads would abort the swap. #}
+<div data-poll>
 <div class="grid grid-4 mb-3">
   <div class="card"><section class="stat">
     <div class="value">{{ my_contacts }}</div><div class="label">assigned to me</div>
@@ -71,4 +74,9 @@
   </section>
 </div>
 {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>window.addEventListener('load', () => Poll.page());</script>
 {% endblock %}

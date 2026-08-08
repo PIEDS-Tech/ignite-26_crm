@@ -7,10 +7,13 @@ whether a mail already went out -- is decided here.
 
 from dataclasses import asdict
 
+from django.core.exceptions import PermissionDenied
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.http import JsonResponse
 from django.views.decorators.http import require_GET, require_POST
 
 from crm.models import Campaign, CampaignMailing, Contact
+from crm.services import contacts as contact_svc
 from crm.services import mailing as mailing_svc
 from shared.enums import CampaignStatus, MailingStatus
 
@@ -64,19 +67,91 @@ def contacts(request):
             ).values_list("contact_id", flat=True)
         )
 
-    qs = Contact.objects.filter(assigned_to=member).order_by("company", "first_name")
-    return JsonResponse([
-        {
-            "id": str(c.id),
-            "name": c.full_name,
-            "email": c.email,
-            "company": c.company,
-            "designation": c.designation,
-            "already_mailed": c.id in mailed,
-            "last_contacted_at": c.last_contacted_at.isoformat() if c.last_contacted_at else None,
-        }
-        for c in qs
-    ], safe=False)
+    # Archived contacts are excluded outright rather than shown greyed: they are
+    # refused by claim_batch anyway, and offering them would only invite a
+    # confusing skip at send time.
+    qs = (
+        Contact.objects.filter(assigned_to=member, is_archived=False)
+        .order_by("company", "first_name")
+    )
+    return JsonResponse([_contact_json(c, mailed) for c in qs], safe=False)
+
+
+def _contact_json(c, mailed=frozenset()):
+    """One contact, with enough detail for the agent's inline edit dialog."""
+    return {
+        "id": str(c.id),
+        "name": c.full_name,
+        "first_name": c.first_name,
+        "last_name": c.last_name,
+        "email": c.email,
+        "phone_no": c.phone_no,
+        "linkedin": c.linkedin,
+        "company": c.company,
+        "designation": c.designation,
+        "tags": list(c.tags or []),
+        "lifecycle": c.lifecycle,
+        "lifecycle_label": c.get_lifecycle_display(),
+        "mailable": c.is_mailable,
+        "already_mailed": c.id in mailed,
+        "last_contacted_at": c.last_contacted_at.isoformat() if c.last_contacted_at else None,
+    }
+
+
+@api_token_required
+def contact_create(request):
+    """Add a contact from the agent. Always assigned to the calling member."""
+    if request.method != "POST":
+        return json_error("POST required.", status=405)
+
+    payload, error = parse_json(request)
+    if error:
+        return error
+
+    try:
+        contact = contact_svc.create(payload, request.member)
+    except DjangoValidationError as exc:
+        return json_error("; ".join(_flatten(exc)), status=422)
+    except PermissionDenied as exc:
+        return json_error(str(exc), status=403)
+
+    return JsonResponse(_contact_json(contact), status=201)
+
+
+@api_token_required
+def contact_update(request, contact_id):
+    """Edit a contact from the agent's row dialog.
+
+    Same permission rule as the web form -- a member may only change contacts
+    assigned to them, and `lifecycle` is dropped for non-leads by the service.
+    """
+    if request.method not in ("PATCH", "POST"):
+        return json_error("PATCH required.", status=405)
+
+    try:
+        contact = Contact.objects.get(id=contact_id)
+    except (Contact.DoesNotExist, ValueError, TypeError):
+        return json_error("No such contact.", status=404)
+
+    payload, error = parse_json(request)
+    if error:
+        return error
+
+    try:
+        contact = contact_svc.update(contact, payload, request.member)
+    except PermissionDenied as exc:
+        return json_error(str(exc), status=403)
+    except DjangoValidationError as exc:
+        return json_error("; ".join(_flatten(exc)), status=422)
+
+    return JsonResponse(_contact_json(contact))
+
+
+def _flatten(exc) -> list[str]:
+    """Django validation errors, field-labelled, as flat strings."""
+    if hasattr(exc, "message_dict"):
+        return [f"{f}: {' '.join(m)}" for f, m in exc.message_dict.items()]
+    return list(exc.messages)
 
 
 def _campaign_and_ids(request):

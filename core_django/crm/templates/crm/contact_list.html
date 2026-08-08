@@ -2,36 +2,101 @@
 {% block title %}Contacts — Ignite CRM{% endblock %}
 {% block heading %}Contacts{% endblock %}
 
+{% block actions %}
+  <a class="btn" href="{% url 'crm:contact_new' %}">Add contact</a>
+  {% if is_lead %}<a class="btn-outline" href="{% url 'crm:contact_import' %}">Import CSV</a>{% endif %}
+{% endblock %}
+
 {% block content %}
 {% include "crm/_filters.html" %}
 
-<div class="table-wrap">
-  <table class="table">
-    <thead><tr>
-      <th>Name</th><th>Company</th><th>Designation</th>
-      <th>Assigned to</th><th>Last contacted</th>
-    </tr></thead>
-    <tbody>
-    {% for c in page %}
-      <tr>
-        <td>
-          <a href="{% url 'crm:contact_detail' c.pk %}">{{ c.full_name }}</a>
-          <div class="text-xs muted">{{ c.email }}</div>
-        </td>
-        <td class="text-sm">{{ c.company }}</td>
-        <td class="text-sm muted">{{ c.designation|default:"—" }}</td>
-        <td class="text-sm">
-          {% if c.assigned_to %}<span class="badge badge-secondary">{{ c.assigned_to.name }}</span>
-          {% else %}<span class="muted">unassigned</span>{% endif %}
-        </td>
-        <td class="text-sm muted">{{ c.last_contacted_at|date:"d M Y"|default:"never" }}</td>
-      </tr>
-    {% empty %}
-      <tr><td colspan="5" class="empty">No contacts match these filters.</td></tr>
-    {% endfor %}
-    </tbody>
-  </table>
-</div>
+<form method="post" action="{% url 'crm:contact_bulk_edit' %}" id="bulk-form">
+  {% csrf_token %}
+  <input type="hidden" name="next" value="{{ request.get_full_path }}">
+
+  <div class="table-wrap" data-poll>
+    <table class="table">
+      <thead><tr>
+        <th style="width:2rem"><input class="input-checkbox" type="checkbox" id="check-all"></th>
+        <th>Name</th><th>Company</th><th>Stage</th><th>Tags</th>
+        <th>Assigned to</th><th>Last contacted</th><th></th>
+      </tr></thead>
+      <tbody>
+      {% for c in page %}
+        <tr {% if c.is_archived %}class="muted"{% endif %}>
+          <td><input class="input-checkbox row-check" type="checkbox"
+                     name="contact_ids" value="{{ c.pk }}"></td>
+          <td>
+            <a href="{% url 'crm:contact_detail' c.pk %}">{{ c.full_name }}</a>
+            {% if c.is_archived %}<span class="badge">archived</span>{% endif %}
+            <div class="text-xs muted">{{ c.email }}</div>
+          </td>
+          <td class="text-sm">
+            {{ c.company }}
+            <div class="text-xs muted">{{ c.designation|default:"—" }}</div>
+          </td>
+          <td><span class="badge lc-{{ c.lifecycle }}">{{ c.get_lifecycle_display }}</span></td>
+          <td class="text-xs">
+            {% for t in c.tags %}<span class="badge badge-secondary">{{ t }}</span>{% empty %}
+              <span class="muted">—</span>{% endfor %}
+          </td>
+          <td class="text-sm">
+            {% if c.assigned_to %}<span class="badge badge-secondary">{{ c.assigned_to.name }}</span>
+            {% else %}<span class="muted">unassigned</span>{% endif %}
+          </td>
+          <td class="text-sm muted">{{ c.last_contacted_at|date:"d M Y"|default:"never" }}</td>
+          <td class="text-sm">
+            {% if is_lead or c.assigned_to_id == member.id %}
+              <a class="btn-ghost" href="{% url 'crm:contact_edit' c.pk %}">Edit</a>
+            {% endif %}
+          </td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="8" class="empty">No contacts match these filters.</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+
+  {# Appears only once something is ticked, so it never competes with the table. #}
+  <div class="card mt-2" id="bulk-panel" hidden>
+    <header>
+      <h2><span id="bulk-count">0</span> selected</h2>
+      <p class="text-xs muted">Blank fields are left alone. You can only change contacts assigned to you.</p>
+    </header>
+    <section class="row wrap" style="gap:.6rem;align-items:flex-end">
+      {% for field in bulk_form %}
+        <div class="col" style="gap:.3rem">
+          <label class="label text-xs" for="{{ field.id_for_label }}">{{ field.label }}</label>
+          {{ field }}
+        </div>
+      {% endfor %}
+      <button type="submit" class="btn">Apply</button>
+    </section>
+  </div>
+</form>
 
 {% include "crm/_pagination.html" %}
+
+<script>
+(function () {
+  const all = document.getElementById('check-all');
+  const panel = document.getElementById('bulk-panel');
+  const count = document.getElementById('bulk-count');
+  const rows = () => Array.from(document.querySelectorAll('.row-check'));
+
+  function sync() {
+    const n = rows().filter(r => r.checked).length;
+    count.textContent = n;
+    panel.hidden = n === 0;
+  }
+  all?.addEventListener('change', () => { rows().forEach(r => r.checked = all.checked); sync(); });
+  document.addEventListener('change', e => { if (e.target.matches('.row-check')) sync(); });
+  // The polled swap replaces the rows, so recount whatever survived it.
+  document.addEventListener('poll:refreshed', sync);
+  sync();
+
+  window.addEventListener('load', () => Poll.page());
+})();
+</script>
 {% endblock %}

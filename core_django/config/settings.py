@@ -60,12 +60,40 @@ TEMPLATES = [
 
 WSGI_APPLICATION = "config.wsgi.application"
 
-DATABASES = {
-    "default": env.db(
-        "DATABASE_URL",
-        default="postgres://ignite:ignite@localhost:5432/ignite_crm",
-    )
-}
+# --- database -------------------------------------------------------------
+# In production this points at Supabase. Two things about that connection are
+# load-bearing and easy to get wrong; see docs in README "Supabase".
+#
+#   1. Use the SESSION pooler (port 5432 on the pooler host). services/mailing.py
+#      and services/assignment.py rely on SELECT ... FOR UPDATE, and the
+#      transaction-mode pooler on 6543 breaks psycopg3's prepared statements.
+#   2. sslmode=require belongs in the URL.
+
+LOCAL_DATABASE_URL = "postgres://ignite:ignite@localhost:5432/ignite_crm"
+
+#: Django's test runner CREATEs and DROPs its database. Once DATABASE_URL points
+#: at Supabase -- as it will in everyone's .env -- an ordinary `pytest` would aim
+#: that at the hosted instance. Tests therefore always run against local Docker
+#: Postgres, regardless of the environment. Override with IGNITE_TEST_DATABASE_URL.
+RUNNING_TESTS = "pytest" in sys.modules or "test" in sys.argv
+
+if RUNNING_TESTS:
+    DATABASE_URL = env("IGNITE_TEST_DATABASE_URL", default=LOCAL_DATABASE_URL)
+else:
+    DATABASE_URL = env("DATABASE_URL", default=LOCAL_DATABASE_URL)
+
+DATABASES = {"default": env.db_url_config(DATABASE_URL)}
+
+# Persistent connections are off by default: a pooler has a finite slot count,
+# and holding one open per gunicorn worker per request cycle exhausts the free
+# tier long before traffic does.
+DATABASES["default"]["CONN_MAX_AGE"] = env.int("DB_CONN_MAX_AGE", default=0)
+
+# Needed only if someone deliberately switches to the transaction-mode pooler
+# (:6543), where server-side prepared statements and cursors are not safe.
+if env.bool("DB_TRANSACTION_POOLER", default=False):
+    DATABASES["default"].setdefault("OPTIONS", {})["prepare_threshold"] = None
+    DISABLE_SERVER_SIDE_CURSORS = True
 
 AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.UserAttributeSimilarityValidator"},

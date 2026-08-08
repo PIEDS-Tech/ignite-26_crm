@@ -1,7 +1,11 @@
 from django import forms
 
-from .models import Campaign, ContactNote
+from shared.enums import ContactLifecycle
+
+from .models import Campaign, Contact, ContactNote, TeamMember
 from .services.campaigns import ALLOWED_VARIABLES, extract_placeholders
+from .services.contacts import clean_tags
+from .services.permissions import can_set_lifecycle, is_lead
 
 
 class BasecoatMixin:
@@ -88,6 +92,94 @@ class CampaignForm(BasecoatMixin, forms.ModelForm):
         return campaign
 
 
+class ContactForm(BasecoatMixin, forms.ModelForm):
+    """Add or edit one contact.
+
+    `lifecycle` and `assigned_to` are removed outright for non-leads rather than
+    disabled -- a disabled field still round-trips through a crafted POST. The
+    service layer strips them again anyway; this is the visible half of the rule.
+    """
+
+    #: Same comma-separated convention as CampaignForm.var_list_raw.
+    tags_raw = forms.CharField(
+        required=False,
+        label="Tags",
+        help_text="Comma-separated, e.g. fintech, priority, iit-b",
+    )
+
+    class Meta:
+        model = Contact
+        fields = [
+            "first_name", "last_name", "email", "phone_no",
+            "linkedin", "company", "designation", "lifecycle", "assigned_to",
+        ]
+
+    def __init__(self, *args, actor=None, **kwargs):
+        self.actor = actor
+        super().__init__(*args, **kwargs)
+
+        if self.instance and self.instance.pk:
+            self.fields["tags_raw"].initial = ", ".join(self.instance.tags or [])
+
+        if not can_set_lifecycle(actor):
+            self.fields.pop("lifecycle", None)
+        if not is_lead(actor):
+            self.fields.pop("assigned_to", None)
+        else:
+            self.fields["assigned_to"].queryset = TeamMember.objects.filter(is_active=True)
+            self.fields["assigned_to"].required = False
+
+    def clean_tags_raw(self):
+        return clean_tags(self.cleaned_data["tags_raw"])
+
+    def clean_email(self):
+        """Give the duplicate a name instead of a bare 'already exists'."""
+        email = self.cleaned_data["email"].strip().lower()
+        clash = Contact.objects.filter(email__iexact=email)
+        if self.instance and self.instance.pk:
+            clash = clash.exclude(pk=self.instance.pk)
+        existing = clash.first()
+        if existing:
+            owner = existing.assigned_to.name if existing.assigned_to else "nobody"
+            raise forms.ValidationError(
+                f"{email} is already in the pool as {existing.full_name} "
+                f"({existing.company}), assigned to {owner}."
+            )
+        return email
+
+    def save(self, commit=True):
+        contact = super().save(commit=False)
+        contact.tags = self.cleaned_data["tags_raw"]
+        if commit:
+            contact.save()
+        return contact
+
+
+class BulkEditForm(BasecoatMixin, forms.Form):
+    """Apply one change to many contacts. Every field blank means 'leave alone'."""
+
+    company = forms.CharField(required=False)
+    designation = forms.CharField(required=False)
+    tags_add = forms.CharField(required=False, label="Add tags",
+                               help_text="Comma-separated")
+    tags_remove = forms.CharField(required=False, label="Remove tags",
+                                  help_text="Comma-separated")
+    lifecycle = forms.ChoiceField(
+        required=False, choices=[("", "— leave alone —")] + ContactLifecycle.choices()
+    )
+
+    def __init__(self, *args, actor=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        if not can_set_lifecycle(actor):
+            self.fields.pop("lifecycle", None)
+
+    def clean_tags_add(self):
+        return clean_tags(self.cleaned_data["tags_add"])
+
+    def clean_tags_remove(self):
+        return clean_tags(self.cleaned_data["tags_remove"])
+
+
 class NoteForm(BasecoatMixin, forms.ModelForm):
     class Meta:
         model = ContactNote
@@ -99,7 +191,8 @@ class CsvUploadForm(forms.Form):
     file = forms.FileField(
         label="CSV file",
         help_text="Required columns: first_name, email, company. "
-                  "Optional: last_name, phone_no, linkedin, designation.",
+                  "Optional: last_name, phone_no, linkedin, designation, tags "
+                  "(semicolon-separated).",
     )
 
 

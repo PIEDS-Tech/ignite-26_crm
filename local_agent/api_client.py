@@ -96,3 +96,14 @@ class CrmClient:
             "POST", f"/mailings/{mailing_id}/result",
             json={"status": "failed", "error": error[:2000]},
         )
+
+    # ---- contact editing -----------------------------------------------
+    # The server applies the same permission rule as the web CRM: a member may
+    # only change contacts assigned to them. We do not check it here as well --
+    # a check on the laptop protects nobody.
+
+    def create_contact(self, data: dict):
+        return self._request("POST", "/contacts/new", json=data)
+
+    def update_contact(self, contact_id: str, data: dict):
+        return self._request("PATCH", f"/contacts/{contact_id}", json=data)

@@ -11,7 +11,7 @@ from django.core.management.base import BaseCommand
 from django.db import transaction
 
 from crm.models import Campaign, Contact, TeamMember
-from shared.enums import CampaignStatus
+from shared.enums import CampaignStatus, ContactLifecycle
 
 MEMBERS = [
     ("Aarav Sharma", "aarav@pilani.bits-pilani.ac.in", "2024", "9812345670"),
@@ -27,6 +27,7 @@ COMPANIES = [
 DESIGNATIONS = ["Founder", "CTO", "VP Engineering", "Head of Partnerships", "Director, Strategy"]
 FIRST = ["Rohan", "Ananya", "Vikram", "Sneha", "Arjun", "Meera", "Nikhil", "Priya", "Rahul", "Tara"]
 LAST = ["Iyer", "Kapoor", "Reddy", "Bose", "Desai", "Malhotra", "Pillai", "Chawla"]
+TAGS = ["fintech", "saas", "deeptech", "priority", "warm-intro", "iit-b", "alum"]
 
 
 class Command(BaseCommand):
@@ -68,6 +69,15 @@ class Command(BaseCommand):
                     "designation": random.choice(DESIGNATIONS),
                     # Leave a third unassigned so the assignment screen has work to do.
                     "assigned_to": random.choice(assignees + [None]),
+                    "tags": random.sample(TAGS, random.randint(0, 2)),
+                    # A couple of blocked contacts so the "refuses to mail"
+                    # path is visible without having to set one up by hand.
+                    "lifecycle": random.choices(
+                        [ContactLifecycle.NEW.value,
+                         ContactLifecycle.REPLIED.value,
+                         ContactLifecycle.DO_NOT_CONTACT.value],
+                        weights=[88, 8, 4],
+                    )[0],
                 },
             )
             created += was_new

@@ -100,6 +100,32 @@ def contacts(campaign_id: str | None = None):
     return _guard(api().contacts, campaign_id)
 
 
+@app.get("/api/me")
+def me():
+    """Live profile, including today's remaining quota.
+
+    Polled by the UI rather than read from `state['profile']`: that snapshot is
+    taken once at startup and would otherwise show a stale send count all day.
+    """
+    return _guard(api().me)
+
+
+@app.post("/api/contacts")
+def create_contact(payload: dict):
+    """Add a contact. The server assigns it to us -- we cannot claim someone else's."""
+    return _guard(api().create_contact, payload)
+
+
+@app.patch("/api/contacts/{contact_id}")
+def update_contact(contact_id: str, payload: dict):
+    """Fix a detail before it gets rendered into a mail.
+
+    The server re-checks that this contact is ours; a 403 here means the contact
+    was reassigned while the page was open.
+    """
+    return _guard(api().update_contact, contact_id, payload)
+
+
 class SendRequest(BaseModel):
     campaign_id: str
     contact_ids: list[str]

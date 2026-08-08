@@ -21,6 +21,26 @@
     {% endfor %}
   </select>
 
+  <select class="select" name="lifecycle">
+    <option value="">Any stage</option>
+    {% for value, label in lifecycles %}
+      <option value="{{ value }}" {% if filters.lifecycle == value %}selected{% endif %}>{{ label }}</option>
+    {% endfor %}
+  </select>
+
+  <select class="select" name="tag">
+    <option value="">Any tag</option>
+    {% for t in all_tags %}
+      <option value="{{ t }}" {% if filters.tag == t %}selected{% endif %}>{{ t }}</option>
+    {% endfor %}
+  </select>
+
+  <label class="row text-sm" style="gap:.4rem;align-items:center">
+    <input class="input-checkbox" type="checkbox" name="archived" value="1"
+           {% if filters.archived == '1' %}checked{% endif %}>
+    Archived
+  </label>
+
   <button type="submit" class="btn">Filter</button>
   <a class="btn-ghost" href="{{ request.path }}">Reset</a>
   <span class="muted text-sm">{{ total }} match{{ total|pluralize:"es" }}</span>

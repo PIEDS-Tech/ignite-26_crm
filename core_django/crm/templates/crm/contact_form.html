@@ -1,0 +1,62 @@
+{% extends "crm/base.html" %}
+{% block title %}{% if contact %}Edit{% else %}Add{% endif %} contact — Ignite CRM{% endblock %}
+{% block heading %}{% if contact %}Edit {{ contact.full_name }}{% else %}Add contact{% endif %}{% endblock %}
+
+{% block content %}
+<form method="post" class="split">
+  {% csrf_token %}
+
+  <div class="card">
+    <section class="col">
+      {% if form.non_field_errors %}
+        <div class="alert alert-destructive"><section>
+          {% for e in form.non_field_errors %}<p>{{ e }}</p>{% endfor %}
+        </section></div>
+      {% endif %}
+
+      {% for field in form %}
+        <div class="col" style="gap:.35rem">
+          <label class="label" for="{{ field.id_for_label }}">{{ field.label }}</label>
+          {{ field }}
+          {% if field.help_text %}<p class="text-xs muted">{{ field.help_text }}</p>{% endif %}
+          {% for e in field.errors %}<p class="text-xs s-FAILED">{{ e }}</p>{% endfor %}
+        </div>
+      {% endfor %}
+
+      <div class="row">
+        <button type="submit" class="btn">Save</button>
+        <a class="btn-ghost"
+           href="{% if contact %}{% url 'crm:contact_detail' contact.pk %}{% else %}{% url 'crm:contact_list' %}{% endif %}">Cancel</a>
+      </div>
+    </section>
+  </div>
+
+  <div class="card sticky">
+    <header><h2>Who can change this</h2></header>
+    <section class="text-sm col">
+      {% if is_lead %}
+        <p class="muted">You are a lead, so you can edit any contact in the pool
+          and set its stage by hand.</p>
+      {% else %}
+        <p class="muted">You can edit the contacts assigned to you. A new contact
+          you add is assigned to you automatically.</p>
+        <p class="text-xs muted">The <strong>stage</strong> is set by the system —
+          it moves to <em>Contacted</em> on its own the moment your first mail to
+          this person is confirmed sent.</p>
+      {% endif %}
+
+      <p class="text-xs muted">Every change is recorded against your name and
+        shows up on the contact's page. This is one shared pool — the edit lands
+        for the whole team immediately.</p>
+
+      {% if contact %}
+        <hr>
+        <p class="text-xs muted">Stage: <span class="badge lc-{{ contact.lifecycle }}">{{ contact.get_lifecycle_display }}</span></p>
+        {% if contact.is_archived %}
+          <p class="text-xs">Archived — this contact will not receive mail.</p>
+        {% endif %}
+      {% endif %}
+    </section>
+  </div>
+</form>
+{% endblock %}

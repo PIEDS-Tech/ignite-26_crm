@@ -14,7 +14,12 @@ from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from crm.models import Campaign, CampaignMailing, Contact
-from shared.enums import CampaignStatus, MailingStatus
+from shared.enums import (
+    BLOCKED_LIFECYCLES,
+    CampaignStatus,
+    ContactLifecycle,
+    MailingStatus,
+)
 
 from .render import MissingVariables, render
 
@@ -24,6 +29,8 @@ ALREADY_MAILED = "ALREADY_MAILED"
 NOT_ASSIGNED = "NOT_ASSIGNED"
 MISSING_VARS = "MISSING_VARS"
 CAP_REACHED = "CAP_REACHED"
+ARCHIVED = "ARCHIVED"
+BLOCKED = "BLOCKED"
 SENT = "SENT"
 FAILED = "FAILED"
 
@@ -74,6 +81,19 @@ def sent_last_24h(member) -> int:
     ).count()
 
 
+def unmailable_reason(contact) -> tuple[str, str] | None:
+    """Why this contact must not be mailed, as (outcome_code, human reason).
+
+    Called from BOTH preflight and claim_batch so the dry run can never disagree
+    with the real thing about who is sendable.
+    """
+    if contact.is_archived:
+        return ARCHIVED, "archived"
+    if contact.lifecycle in BLOCKED_LIFECYCLES:
+        return BLOCKED, f"marked {contact.get_lifecycle_display().lower()}"
+    return None
+
+
 def preflight(campaign, member, contact_ids) -> list[dict]:
     """Dry run. Writes nothing; tells the user exactly what will happen."""
     already = set(
@@ -91,8 +111,12 @@ def preflight(campaign, member, contact_ids) -> list[dict]:
             "email": contact.email,
             "name": contact.full_name,
         }
+        blocked = unmailable_reason(contact)
+
         if contact.assigned_to_id != member.id:
             results.append({**base, "status": NOT_ASSIGNED, "detail": "not assigned to you"})
+        elif blocked:
+            results.append({**base, "status": blocked[0], "detail": blocked[1]})
         elif contact.id in already:
             results.append({**base, "status": ALREADY_MAILED, "detail": "already has a mailing"})
         else:
@@ -136,6 +160,16 @@ def claim_batch(campaign, member, contact_ids) -> tuple[list[Claimed], list[Skip
                     skipped.append(
                         Skipped(str(contact.id), contact.email, contact.full_name,
                                 "not assigned to you")
+                    )
+                    continue
+
+                # Re-checked here under the lock rather than trusted from the
+                # agent's stale list: someone may have archived this contact
+                # between the page loading and the send being pressed.
+                blocked = unmailable_reason(contact)
+                if blocked:
+                    skipped.append(
+                        Skipped(str(contact.id), contact.email, contact.full_name, blocked[1])
                     )
                     continue
 
@@ -216,6 +250,14 @@ def record_result(mailing_id, member, *, status, message_id="", thread_id="", er
         Contact.objects.filter(id=mailing.contact_id).update(
             last_contacted_by=member, last_contacted_at=now, updated_at=now
         )
+
+        # The "changes the moment they mail" rule. Scoped to NEW deliberately:
+        # a contact someone has already marked REPLIED must never be dragged
+        # backwards to CONTACTED by a later campaign.
+        Contact.objects.filter(
+            id=mailing.contact_id, lifecycle=ContactLifecycle.NEW.value
+        ).update(lifecycle=ContactLifecycle.CONTACTED.value, updated_at=now)
+
         return {"status": SENT, "detail": thread_id}
 
     mailing.status = MailingStatus.FAILED.value

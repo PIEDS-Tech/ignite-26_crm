@@ -8,9 +8,14 @@ urlpatterns = [
     path("", views.home, name="home"),
 
     path("contacts/", views.contact_list, name="contact_list"),
+    path("contacts/new/", views.contact_new, name="contact_new"),
     path("contacts/import/", views.contact_import, name="contact_import"),
     path("contacts/import/confirm/", views.contact_import_confirm, name="contact_import_confirm"),
+    path("contacts/bulk-edit/", views.contact_bulk_edit, name="contact_bulk_edit"),
     path("contacts/<uuid:pk>/", views.contact_detail, name="contact_detail"),
+    path("contacts/<uuid:pk>/edit/", views.contact_edit, name="contact_edit"),
+    path("contacts/<uuid:pk>/archive/", views.contact_archive, name="contact_archive"),
+    path("contacts/<uuid:pk>/delete/", views.contact_delete, name="contact_delete"),
 
     path("assign/", views.assign, name="assign"),
     path("assign/apply/", views.assign_apply, name="assign_apply"),

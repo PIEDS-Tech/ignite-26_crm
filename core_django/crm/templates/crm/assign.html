@@ -11,7 +11,7 @@
   <input type="hidden" name="force" id="forceField" value="0">
 
   <div class="split">
-    <div class="table-wrap">
+    <div class="table-wrap" data-poll>
       <table class="table">
         <thead>
           <tr>
@@ -94,7 +94,10 @@
     picks().forEach(p => p.checked = e.target.checked);
     sync();
   });
-  picks().forEach(p => p.addEventListener('change', sync));
+  // Delegated, not bound per row: a background refresh replaces the rows and
+  // would otherwise drop the listeners with them.
+  document.addEventListener('change', e => { if (e.target.matches('.pick')) sync(); });
+  document.addEventListener('poll:refreshed', sync);
 
   document.getElementById('assignForm').addEventListener('submit', e => {
     if (e.submitter && e.submitter.value === 'assign' && !document.getElementById('memberSelect').value) {
@@ -104,5 +107,6 @@
   });
 
   sync();
+  window.addEventListener('load', () => Poll.page());
 </script>
 {% endblock %}
