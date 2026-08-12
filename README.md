@@ -849,12 +849,18 @@ Each person needs **their own** token. Never share one — the token is what mak
 docker build -t ignite-crm .        # from the repo root; `shared/` needs it
 ```
 
-The image's default command is the CRM. Run it with the entrypoint below so a
-deploy migrates and verifies before it serves:
+The image's default command is the CRM, behind the same entrypoint compose uses,
+so a deploy verifies the database before it serves:
 
 ```bash
 docker run -p 8000:8000 --env-file prod.env ignite-crm
 ```
+
+**Set `RUN_MIGRATIONS=true` in `prod.env`.** A deploy's `DATABASE_URL` is
+Supabase, which the entrypoint reads as a shared database and therefore does
+*not* migrate by default (§13.1) — the rule that stops five laptops racing each
+other also stops your one server, and it has no way to tell the difference.
+Without it, `check_db` fails the boot on the first deploy after a migration.
 
 App-level environment variables:
 
@@ -870,8 +876,9 @@ With `DEBUG=False`, `settings.py` automatically enables `SECURE_SSL_REDIRECT`,
 one-year HSTS with subdomains, `X_FRAME_OPTIONS=DENY`, `CSRF_TRUSTED_ORIGINS`
 derived from `ALLOWED_HOSTS`, and `CompressedManifestStaticFilesStorage`.
 
-Release step: `manage.py migrate && manage.py check_db`. Static files are built
-into the image via `collectstatic` and served by whitenoise — no nginx needed.
+The entrypoint is the release step — it migrates (given `RUN_MIGRATIONS=true`)
+and runs `check_db` before gunicorn binds. Static files are built into the image
+via `collectstatic` and served by whitenoise — no nginx needed.
 
 Then point each member's `AGENT_API_BASE_URL` at the public HTTPS host.
 
