@@ -608,10 +608,11 @@ an entrypoint. **The split is enforced by environment, not by files:** the agent
 container is simply never given `DATABASE_URL`.
 
 `docker/entrypoint-crm.sh` runs before gunicorn and, in order: prints the
-database it is about to use, blocks on `pg_isready`, `migrate`, then **`check_db`
-— and refuses to boot if it fails.** A container that came up without
-`uniq_campaign_contact` could double-mail a prospect, so not starting is the
-correct outcome. `seed_dev` runs last, only when `SEED_DEV=true`.
+database it is about to use, blocks on `pg_isready`, migrates *if the database is
+local*, then **`check_db` — and refuses to boot if it fails.** A container that
+came up without `uniq_campaign_contact` could double-mail a prospect, so not
+starting is the correct outcome. `seed_dev` runs last, under the same
+local-only rule. Both rules are spelt out just below.
 
 | Variable | Default in compose | |
 |---|---|---|
