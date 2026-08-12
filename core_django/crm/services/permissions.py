@@ -8,13 +8,19 @@ which batch leads next year is a one-line edit.
 from functools import wraps
 
 from django.core.exceptions import PermissionDenied
+from django.shortcuts import redirect
 
 from shared.enums import LEAD_BATCH
 
 
-def get_member(user):
-    """Resolve the TeamMember behind a Django login, or None."""
-    return getattr(user, "team_member", None)
+def get_member(request):
+    """Resolve the signed-in TeamMember, or None.
+
+    Identity is a session key, not a Django `User` -- see services/auth.py.
+    """
+    from .auth import current_member
+
+    return current_member(request)
 
 
 def is_lead(member) -> bool:
@@ -26,7 +32,11 @@ def lead_required(view_func):
 
     @wraps(view_func)
     def _wrapped(request, *args, **kwargs):
-        member = get_member(request.user) if request.user.is_authenticated else None
+        member = get_member(request)
+        # Nobody signed in is a wrong turn -- send them to the front door.
+        # Signed in but not a lead is a real refusal, and says so.
+        if member is None:
+            return redirect("login")
         if not is_lead(member):
             raise PermissionDenied(
                 f"Only active batch-{LEAD_BATCH} members may access this page."
@@ -42,9 +52,9 @@ def member_required(view_func):
 
     @wraps(view_func)
     def _wrapped(request, *args, **kwargs):
-        member = get_member(request.user) if request.user.is_authenticated else None
-        if not member or not member.is_active:
-            raise PermissionDenied("You are not registered as an active team member.")
+        member = get_member(request)
+        if member is None:
+            return redirect("login")
         request.member = member
         return view_func(request, *args, **kwargs)
 

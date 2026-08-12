@@ -1,5 +1,14 @@
+# The whole stack in one step:  docker compose up --build
+#
+# Compose reads the repo-root .env automatically, so every ${VAR} below comes
+# from there. Values set under `environment:` win over whatever a container's
+# .env would say, which is what lets the same .env serve laptops and containers.
 services:
+  # Local development only. Behind a profile so that pointing DATABASE_URL at
+  # Supabase does not also leave an unused database running beside it.
+  # `COMPOSE_PROFILES=localdb` in .env turns it on; .env.example ships with it.
   postgres:
+    profiles: ["localdb"]
     image: postgres:16
     container_name: ignite_crm_pg
     environment:
@@ -7,7 +16,9 @@ services:
       POSTGRES_PASSWORD: ignite
       POSTGRES_DB: ignite_crm
     ports:
-      - "5432:5432"
+      # Host-side port only. Tests and `manage.py` runs from the host expect
+      # 5432; set PG_HOST_PORT if another project already owns it.
+      - "${PG_HOST_PORT:-5432}:5432"
     volumes:
       - ignite_pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -15,6 +26,82 @@ services:
       interval: 5s
       timeout: 5s
       retries: 10
+
+  # The CRM. The only process in this file that gets DATABASE_URL.
+  crm:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ignite-crm
+    container_name: ignite_crm_web
+    # No depends_on: `postgres` is profiled and may legitimately not exist at
+    # all. The entrypoint's own pg_isready loop waits for whatever DATABASE_URL
+    # names, which covers the hosted case too -- something depends_on cannot.
+    environment:
+      # `postgres` is the compose service name, not localhost -- each container
+      # has its own loopback.
+      DATABASE_URL: ${DATABASE_URL_DOCKER:-postgres://ignite:ignite@postgres:5432/ignite_crm}
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-dev-insecure-key-do-not-use-in-prod}
+      # True by default because DEBUG=False turns on SECURE_SSL_REDIRECT, which
+      # would bounce plain-http://localhost:8000 to https and appear "broken".
+      DJANGO_DEBUG: ${DJANGO_DEBUG:-True}
+      # `crm` is appended rather than defaulted: the agent container reaches the
+      # CRM by that hostname and Django validates the Host header, so a .env
+      # that lists only localhost must not be able to drop it.
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1},crm
+      # Batch 2025 signs in with Google. A WEB OAuth client, not the DESKTOP
+      # one the agent uses for Gmail. Blank disables that door with a message.
+      GOOGLE_OAUTH_CLIENT_ID: ${GOOGLE_OAUTH_CLIENT_ID:-}
+      GOOGLE_OAUTH_CLIENT_SECRET: ${GOOGLE_OAUTH_CLIENT_SECRET:-}
+      GOOGLE_OAUTH_HOSTED_DOMAIN: ${GOOGLE_OAUTH_HOSTED_DOMAIN:-pilani.bits-pilani.ac.in}
+      DB_CONN_MAX_AGE: ${DB_CONN_MAX_AGE:-0}
+      DB_TRANSACTION_POOLER: ${DB_TRANSACTION_POOLER:-False}
+      # Both default to "whether DATABASE_URL is a local database" -- see the
+      # header of docker/entrypoint-crm.sh. Left empty here so that logic runs;
+      # set either to true/false to decide explicitly.
+      RUN_MIGRATIONS: ${RUN_MIGRATIONS:-}
+      SEED_DEV: ${SEED_DEV:-}
+    ports:
+      - "8000:8000"
+    entrypoint: ["./docker/entrypoint-crm.sh"]
+    command:
+      ["gunicorn", "config.wsgi:application",
+       "--chdir", "/app/core_django",
+       "--bind", "0.0.0.0:8000", "--workers", "3", "--access-logfile", "-"]
+
+  # The sending agent. Opt-in: `docker compose --profile agent up`.
+  # It needs an API token that only exists once the CRM is running, and a Gmail
+  # consent that has to happen in a real browser -- see README section 13.1.
+  agent:
+    profiles: ["agent"]
+    image: ignite-crm
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ignite_crm_agent
+    depends_on:
+      - crm
+    environment:
+      # Deliberately no DATABASE_URL. The agent has no database access; that is
+      # the security model, not an oversight.
+      AGENT_API_BASE_URL: http://crm:8000
+      AGENT_API_TOKEN: ${AGENT_API_TOKEN:-}
+      AGENT_MEMBER_EMAIL: ${AGENT_MEMBER_EMAIL:-}
+      AGENT_SEND_DELAY_SECONDS: ${AGENT_SEND_DELAY_SECONDS:-2}
+      # Both live in the mounted token dir. Bind-mounting the single JSON file
+      # instead would make Docker silently create a *directory* named
+      # client_secret.json in the repo whenever the file is missing.
+      GOOGLE_CLIENT_SECRETS_PATH: /tokens/client_secret.json
+      AGENT_TOKEN_DIR: /tokens
+    volumes:
+      # Cached Gmail tokens, shared with a host-side agent run: consent granted
+      # once on the host is reused here. Copy client_secret.json in beside them.
+      - ${AGENT_TOKEN_DIR_HOST:-~/.ignite_crm}:/tokens
+    ports:
+      - "8111:8111"
+    entrypoint: ["./docker/entrypoint-agent.sh"]
+    command:
+      ["uvicorn", "local_agent.main:app", "--host", "0.0.0.0", "--port", "8111"]
 
 volumes:
   ignite_pgdata:

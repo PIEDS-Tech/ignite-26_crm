@@ -1,0 +1,15 @@
+.git/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Secrets are injected as environment variables / mounts at run time, never
+# baked into a layer.
+.env
+client_secret.json
+token_*.json
+.ignite_crm/
+
+core_django/staticfiles/
+.DS_Store

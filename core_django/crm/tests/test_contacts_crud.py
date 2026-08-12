@@ -19,6 +19,7 @@ from django.core.exceptions import PermissionDenied, ValidationError
 from django.urls import reverse
 
 from crm.models import ApiToken, Campaign, CampaignMailing, Contact, ContactAudit, TeamMember
+from crm.services import auth as auth_svc
 from crm.services import contacts as contact_svc
 from crm.services import mailing as mailing_svc
 from shared.enums import CampaignStatus, ContactLifecycle, MailingStatus
@@ -289,23 +290,30 @@ class TestAuditTrail:
 
 # --------------------------------------------------------- the HTTP layer
 
+def signin(client, member):
+    """Establish a CRM session. Identity is a session key, not a Django User."""
+    session = client.session
+    session[auth_svc.SESSION_KEY] = str(member.id)
+    session.save()
+
+
 class TestWebViews:
     def test_member_gets_403_editing_someone_elses(self, client, member, theirs):
-        client.force_login(member.user)
+        signin(client, member)
         r = client.get(reverse("crm:contact_edit", args=[theirs.pk]))
         assert r.status_code == 403
 
     def test_member_can_open_their_own(self, client, member, mine):
-        client.force_login(member.user)
+        signin(client, member)
         r = client.get(reverse("crm:contact_edit", args=[mine.pk]))
         assert r.status_code == 200
 
     def test_lead_can_open_anyones(self, client, lead, theirs):
-        client.force_login(lead.user)
+        signin(client, lead)
         assert client.get(reverse("crm:contact_edit", args=[theirs.pk])).status_code == 200
 
     def test_member_cannot_reach_the_delete_route(self, client, member, mine):
-        client.force_login(member.user)
+        signin(client, member)
         r = client.post(reverse("crm:contact_delete", args=[mine.pk]))
         assert r.status_code == 403
         assert Contact.objects.filter(pk=mine.pk).exists()
@@ -313,7 +321,7 @@ class TestWebViews:
     def test_archived_contacts_are_hidden_from_the_list_by_default(
         self, client, member, mine
     ):
-        client.force_login(member.user)
+        signin(client, member)
         contact_svc.set_archived(mine, member, archived=True)
 
         assert mine.email not in client.get(reverse("crm:contact_list")).content.decode()

@@ -1,11 +1,17 @@
 from django.contrib import admin
-from django.contrib.auth import views as auth_views
 from django.urls import include, path
 
+from crm import auth_views
+
 urlpatterns = [
+    # Django's own auth, for superusers only. The CRM does not use it.
     path("admin/", admin.site.urls),
-    path("login/", auth_views.LoginView.as_view(template_name="crm/login.html"), name="login"),
-    path("logout/", auth_views.LogoutView.as_view(), name="logout"),
+
+    path("login/", auth_views.login_page, name="login"),
+    path("login/name/", auth_views.login_by_name, name="login_by_name"),
+    path("login/google/", auth_views.google_login, name="google_login"),
+    path("login/google/callback/", auth_views.google_callback, name="google_callback"),
+    path("logout/", auth_views.logout_view, name="logout"),
     path("api/v1/", include("crm.api.urls")),
     path("", include("crm.urls")),
 ]

@@ -6,12 +6,19 @@ repeatedly while iterating.
 
 import random
 
-from django.contrib.auth.models import User
-from django.core.management.base import BaseCommand
+from django.conf import settings
+from django.core.management.base import BaseCommand, CommandError
 from django.db import transaction
 
 from crm.models import Campaign, Contact, TeamMember
-from shared.enums import CampaignStatus, ContactLifecycle
+from shared.enums import LEAD_BATCH, CampaignStatus, ContactLifecycle
+
+#: Seeding writes fixture contacts and an active campaign. Doing that to the
+#: database the whole team shares would put invented prospects in a real pool --
+#: and `update_or_create` on `title` means it would happily overwrite a live
+#: campaign's template. The entrypoint decides this too; the check lives here as
+#: well because a person typing the command by hand deserves the same guard.
+LOCAL_HOSTS = {"", "localhost", "127.0.0.1", "::1", "postgres"}
 
 MEMBERS = [
     ("Aarav Sharma", "aarav@pilani.bits-pilani.ac.in", "2024", "9812345670"),
@@ -35,25 +42,38 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument("--contacts", type=int, default=50)
+        parser.add_argument(
+            "--force",
+            action="store_true",
+            help="Seed even when the database is not local. Almost never right.",
+        )
 
     @transaction.atomic
     def handle(self, *args, **opts):
+        host = (settings.DATABASES["default"].get("HOST") or "").lower()
+        if host not in LOCAL_HOSTS and not opts["force"]:
+            raise CommandError(
+                f"Refusing to seed {host!r} -- that is not a local database. "
+                f"Seeding writes fixture contacts and overwrites the campaign "
+                f"template of the same title. Pass --force if you are certain."
+            )
+
         random.seed(42)
 
         members = []
         for name, email, batch, phone in MEMBERS:
-            user, _ = User.objects.get_or_create(
-                username=email.split("@")[0], defaults={"email": email}
-            )
-            user.set_password("devpassword")
-            user.save()
-
             member, _ = TeamMember.objects.update_or_create(
                 bits_email=email,
-                defaults={"name": name, "batch": batch, "phone": phone, "user": user},
+                defaults={"name": name, "batch": batch, "phone": phone},
             )
             members.append(member)
-        self.stdout.write(f"team members: {len(members)} (password: devpassword)")
+
+        # No Django Users: the CRM signs people in by name (batch 2024) or with
+        # Google (batch 2025). `manage.py createsuperuser` is for /admin/ only.
+        leads = [m.name for m in members if m.batch == LEAD_BATCH]
+        self.stdout.write(
+            f"team members: {len(members)} — sign in by picking a name: {', '.join(leads)}"
+        )
 
         assignees = [m for m in members if m.batch == "2025"]
         created = 0

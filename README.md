@@ -23,7 +23,7 @@ Gmail.
 12. [Setup](#12-setup)
 13. [Running it](#13-running-it)
 14. [Supabase — the master database](#14-supabase--the-master-database)
-15. [Gmail setup](#15-gmail-setup)
+15. [Google setup](#15-google-setup)
 16. [Deploying](#16-deploying)
 17. [Tests](#17-tests)
 18. [Environment variables](#18-environment-variables)
@@ -127,6 +127,7 @@ Defined once, in `shared/enums.py::LEAD_BATCH` (currently `"2024"`) and
 
 | | batch 2024 (lead) | batch 2025 |
 |---|---|---|
+| **Signs in by** | **picking their name** | **Google, BITS domain only** |
 | See the whole pool | ✅ | ✅ |
 | Edit a contact | anyone's | **only their own assigned** |
 | Archive / restore | anyone's | only their own |
@@ -142,6 +143,31 @@ Defined once, in `shared/enums.py::LEAD_BATCH` (currently `"2024"`) and
 
 Both batches edit from **either surface**: full forms in the Django CRM, and an
 inline row editor in the local agent for fixing a detail just before sending.
+
+### 4.1 Two doors, one per batch
+
+There is no password anywhere in the CRM. `services/auth.py` holds both doors,
+and identity is a session key holding a `TeamMember` id — Django's `User` model
+is consulted only by `/admin/`.
+
+**Batch 2024 picks their name from a list.** Every lead runs the CRM on their own
+laptop against the shared database, so the only person who can reach that form is
+the person holding the machine. A password there protects nothing the laptop's
+lock screen doesn't.
+
+**Batch 2025 signs in with Google**, restricted to the BITS hosted domain and
+matched against `TeamMember.bits_email`. They must prove that identity anyway —
+the sending agent refuses to run unless the Gmail session matches the member — so
+this reuses a proof they already have to give rather than inventing a second one.
+
+**The 2025 half is a refusal, not a filter.** The name list only contains leads,
+but posting a 2025 member's id directly to `/login/name/` is rejected too. If
+anyone could claim a lead identity from a dropdown, every rule in the table above
+would be advisory. That is what `test_login.py` pins.
+
+> **This assumes the CRM is reachable only by people you trust** — on localhost,
+> or on a network only the team can reach. Do not put the name door on a public
+> hostname: it is, deliberately, a list of names and a Continue button.
 
 **Why 2025 members can edit at all.** They are the ones actually in conversation
 with their prospects, so they are the first to learn that a designation changed
@@ -431,7 +457,8 @@ replaces the rows and would otherwise take the listeners with them.
 | `/campaigns/<id>/` | Funnel, live preview, status transitions | any member |
 | `/campaigns/new/` · `/campaigns/<id>/edit/` | Template editor with placeholder validation | **lead** |
 | `/members/` | Team load, issue/revoke API tokens | **lead** |
-| `/admin/` | Django admin | superuser |
+| `/login/` | Sign in — name list, or Google | anyone |
+| `/admin/` | Django admin | superuser (password auth, separate) |
 
 ### Local agent — `http://localhost:8111`
 
@@ -498,6 +525,7 @@ no laptop to update.
 | `campaigns.py` | `validate_template`, `transition`, `extract_placeholders`, `ALLOWED_VARIABLES` |
 | `importer.py` | `parse` → `ImportPreview`, `commit` |
 | `render.py` | `render`, `contact_context`, `MissingVariables` |
+| `auth.py` | `login_member`, `current_member`, `name_login_allowed`, `member_from_google_callback`, `SESSION_KEY` |
 
 Two guards worth knowing about:
 
@@ -519,6 +547,30 @@ against that set **and** against the campaign's declared `var_list`, so
 
 ## 12. Setup
 
+### 12.1 Docker — the whole CRM in one command
+
+```bash
+git clone <repo> && cd ignite_crm
+cp .env.example .env               # leave the agent section blank for now
+
+docker compose up --build
+```
+
+`.env.example` ships with `COMPOSE_PROFILES=localdb`, which is what starts the
+local Postgres container. Keep that line for local development; drop it when you
+move to a hosted database (§14).
+
+That is everything: Postgres 16, migrations, `check_db`, `seed_dev`, and
+gunicorn on <http://localhost:8000>. Nothing is installed on the host — no venv,
+no Python version to match. See §13.1 for what it actually does and how to add
+the agent.
+
+Requires only Docker. If another project already owns port 5432, run
+`PG_HOST_PORT=5442 docker compose up --build` — that changes the *host* port
+only; nothing inside the stack notices.
+
+### 12.2 Native — for working on the code
+
 ```bash
 git clone <repo> && cd ignite_crm
 
@@ -531,24 +583,104 @@ docker compose up -d               # Postgres 16 on :5432
 cd core_django
 ../.venv/bin/python manage.py migrate
 ../.venv/bin/python manage.py check_db          # verify the constraint landed
-../.venv/bin/python manage.py seed_dev          # dev data; password: devpassword
-../.venv/bin/python manage.py createsuperuser   # optional, for /admin/
+../.venv/bin/python manage.py seed_dev          # dev data
+../.venv/bin/python manage.py createsuperuser   # optional, for /admin/ only
 ```
 
 `seed_dev` creates four members — `aarav`, `diya` (batch 2024, leads) and
 `kabir`, `ishita` (batch 2025) — plus ~50 contacts with assorted tags and
-lifecycles, and one active campaign. Usernames are the email local-parts;
-password is `devpassword`.
+lifecycles, and one active campaign. The two leads can sign in immediately by
+picking their name; the 2025 members need Google configured (§15.1).
 
 ---
 
 ## 13. Running it
 
+### 13.1 Docker
+
+```bash
+docker compose up --build          # postgres + CRM   → http://localhost:8000
+```
+
+One image (`./Dockerfile`) contains both apps, because they share `shared/` and
+the same dependency set. Compose decides which one a container runs by choosing
+an entrypoint. **The split is enforced by environment, not by files:** the agent
+container is simply never given `DATABASE_URL`.
+
+`docker/entrypoint-crm.sh` runs before gunicorn and, in order: prints the
+database it is about to use, blocks on `pg_isready`, `migrate`, then **`check_db`
+— and refuses to boot if it fails.** A container that came up without
+`uniq_campaign_contact` could double-mail a prospect, so not starting is the
+correct outcome. `seed_dev` runs last, only when `SEED_DEV=true`.
+
+| Variable | Default in compose | |
+|---|---|---|
+| `COMPOSE_PROFILES` | `localdb` in `.env.example` | runs the local Postgres container; drop it once `DATABASE_URL_DOCKER` points at Supabase |
+| `PG_HOST_PORT` | `5432` | host-side Postgres port; change it on a collision |
+| `RUN_MIGRATIONS` | *auto* | `true` only if the database is local — see below |
+| `SEED_DEV` | *auto* | same rule |
+| `DJANGO_DEBUG` | `True` | `False` turns on `SECURE_SSL_REDIRECT`, which bounces plain-http localhost to https |
+| `DATABASE_URL_DOCKER` | `…@postgres:5432/…` | point it at Supabase to skip the local Postgres |
+
+#### Migrating and seeding decide themselves
+
+Both default to **whether `DATABASE_URL` names a local database** (`localhost`,
+`127.0.0.1`, `::1`, or the `postgres` service), rather than to a flag somebody
+has to remember to flip:
+
+| | local Postgres | shared hosted database |
+|---|---|---|
+| `migrate` | every boot | **skipped** — set `RUN_MIGRATIONS=true` on the one machine that owns the schema |
+| `seed_dev` | every boot | **skipped** — and `seed_dev` itself refuses a non-local host without `--force` |
+| `check_db` | **always** | **always** |
+
+Skipping migrations is safe precisely because `check_db` is not skipped: a
+laptop pointed at a database whose schema was never built exits non-zero with
+`MISSING campaign_mailings.uniq_campaign_contact` rather than serving a CRM that
+can double-mail. The guard is in `seed_dev.py` as well as the entrypoint,
+because someone typing the command by hand deserves the same protection.
+
+`DJANGO_ALLOWED_HOSTS` gets `crm` **appended**, not defaulted — the agent
+container reaches the CRM by that hostname and Django validates `Host`, so a
+`.env` listing only `localhost` must not be able to drop it.
+
+#### Adding the agent
+
+The agent is behind a profile because it cannot start unprepared: it needs an
+API token that only exists once the CRM is up, and a Gmail consent that has to
+happen in a real browser.
+
+```bash
+# 1. token (the /members/ page is the normal path; this is for bootstrapping)
+docker compose exec crm python core_django/manage.py issue_token \
+    aarav@pilani.bits-pilani.ac.in --label docker
+
+# 2. paste AGENT_API_TOKEN and AGENT_MEMBER_EMAIL into .env
+
+# 3. Gmail consent — ONCE, on the host, because the OAuth flow opens a browser
+#    and binds 127.0.0.1:8080 inside whatever runs it
+mkdir -p ~/.ignite_crm && cp client_secret.json ~/.ignite_crm/
+.venv/bin/uvicorn local_agent.main:app --port 8111    # press "Verify Gmail", then Ctrl-C
+
+# 4. now the container reuses that cached token
+docker compose --profile agent up --build             # → http://localhost:8111
+```
+
+`~/.ignite_crm` is mounted at `/tokens`, holding both `client_secret.json` and
+the cached `token_*.json`. Step 3 is a one-time cost per member; after it, the
+agent is `docker compose --profile agent up` forever.
+
+The agent container's own entrypoint fails fast with an explanation when
+`AGENT_API_TOKEN` is empty, rather than letting uvicorn crash-loop on the
+lifespan identity check.
+
+### 13.2 Native
+
 Three terminals, from the repo root:
 
 ```bash
 # 1. database
-docker compose up -d
+docker compose up -d postgres
 
 # 2. backend — the CRM                          → http://localhost:8000
 cd core_django && ../.venv/bin/python manage.py runserver 8000
@@ -561,8 +693,8 @@ Log in at <http://localhost:8000/login/>:
 
 | User | Batch | Sees |
 |---|---|---|
-| `aarav` / `devpassword` | 2024 lead | everything |
-| `kabir` / `devpassword` | 2025 | 403 on `/assign/`, `/contacts/import/`, `/campaigns/new/`, `/members/` |
+| Aarav (pick the name) | 2024 lead | everything |
+| Kabir (Google sign-in) | 2025 | 403 on `/assign/`, `/contacts/import/`, `/campaigns/new/`, `/members/` |
 
 The agent runs as whichever member `AGENT_API_TOKEN` belongs to.
 
@@ -593,7 +725,18 @@ Three ways to get this wrong, worst first:
 `DB_CONN_MAX_AGE` defaults to `0`. Persistent connections eat pooler slots on the
 free tier faster than traffic does.
 
-### 14.2 Cutover
+### 14.2 What changes in `.env` on every laptop
+
+```diff
+- COMPOSE_PROFILES=localdb                    # stop running a database nobody uses
++ DATABASE_URL_DOCKER=postgres://postgres.<ref>:<pw>@aws-0-<region>.pooler.supabase.com:5432/postgres?sslmode=require
+```
+
+Nothing else. `RUN_MIGRATIONS` and `SEED_DEV` notice the host is not local and
+switch themselves off (§13.1) — on the one machine that owns the schema, set
+`RUN_MIGRATIONS=true`.
+
+### 14.3 Cutover
 
 ```bash
 cd core_django
@@ -614,7 +757,7 @@ DATABASE_URL="<session-pooler-url>" ../.venv/bin/python manage.py check_db
 
 **Step 2 is not optional.** The entire no-double-mail guarantee is one index.
 
-### 14.3 RLS
+### 14.4 RLS
 
 Django connects as `postgres`, which **bypasses RLS**. That is deliberate: Django
 is the only client, and permissions are enforced in `services/permissions.py`.
@@ -624,7 +767,7 @@ Two consequences to respect:
 - Do not add a second direct-to-Postgres client without revisiting this decision.
   If a browser ever talks to Supabase directly, every rule in this repo is bypassed.
 
-### 14.4 Tests never touch it
+### 14.5 Tests never touch it
 
 `config/settings.py` forces local Docker Postgres whenever pytest is running,
 regardless of `DATABASE_URL`:
@@ -645,15 +788,44 @@ ignite: tests pinned to localhost:5432/ignite_crm (never the hosted database)
 ```
 
 Verified by running the suite with `DATABASE_URL` pointed at a fake Supabase
-host: all 65 tests still pass against localhost.
+host: all 76 tests still pass against localhost.
 
 ---
 
-## 15. Gmail setup
+## 15. Google setup
+
+**Two OAuth clients, one Google Cloud project.** They are not interchangeable and
+mixing them up is the most likely thing to go wrong here:
+
+| | client type | used by | for |
+|---|---|---|---|
+| `client_secret.json` | **Desktop app** | `local_agent` | sending mail as the member |
+| `GOOGLE_OAUTH_CLIENT_ID/SECRET` | **Web application** | `core_django` | batch-2025 sign-in |
+
+### 15.1 Web client — sign-in for batch 2025
+
+1. **Credentials → Create OAuth client ID → Web application**.
+2. Authorised redirect URI, exactly:
+   `http://localhost:8000/login/google/callback/`
+   (add your public URL too if you host the CRM).
+3. Put the id and secret in `.env` as `GOOGLE_OAUTH_CLIENT_ID` /
+   `GOOGLE_OAUTH_CLIENT_SECRET`.
+
+Leave them blank and the Google door is disabled with a message on the login
+page rather than a stack trace — but **no batch-2025 member can sign in to the
+CRM until they are set**. They can still send: the agent authenticates with an
+API token, not a browser session.
+
+`GOOGLE_OAUTH_HOSTED_DOMAIN` defaults to `pilani.bits-pilani.ac.in` and is
+checked against the signed `hd` claim, so a personal Gmail is refused even if
+somebody put one in the pool. Sign-in never creates a member — an address with
+no active `TeamMember` is turned away.
+
+### 15.2 Desktop client — sending
 
 One-time, per member:
 
-1. **Google Cloud Console** → new project → enable the **Gmail API**.
+1. **Google Cloud Console** → same project → enable the **Gmail API**.
 2. **OAuth consent screen** → External → add each team member as a test user.
 3. **Credentials → Create OAuth client ID → Desktop app** → download the JSON as
    `client_secret.json` at the repo root (gitignored).
@@ -673,7 +845,14 @@ Each person needs **their own** token. Never share one — the token is what mak
 ## 16. Deploying
 
 ```bash
-docker build -f core_django/Dockerfile -t ignite-crm .   # from the repo root
+docker build -t ignite-crm .        # from the repo root; `shared/` needs it
+```
+
+The image's default command is the CRM. Run it with the entrypoint below so a
+deploy migrates and verifies before it serves:
+
+```bash
+docker run -p 8000:8000 --env-file prod.env ignite-crm
 ```
 
 App-level environment variables:
@@ -703,13 +882,14 @@ Then point each member's `AGENT_API_BASE_URL` at the public HTTPS host.
 .venv/bin/python -m pytest          # needs docker compose up
 ```
 
-**65 tests**, all passing:
+**76 tests**, all passing:
 
 | File | Count | Covers |
 |---|---|---|
 | `test_constraints.py` | 13 | the unique constraint, permissions, status transitions |
 | `test_mailing_api.py` | 19 | token auth, claim/report, preflight, drafts, retry |
 | `test_contacts_crud.py` | 33 | edit scoping, lifecycle rules, archive/delete, audit, HTTP layer |
+| `test_login.py` | 11 | the two doors — see §4.1 |
 
 The single most important test:
 
@@ -748,6 +928,9 @@ naming its actor.
 | `DJANGO_DEBUG` | `False` | |
 | `DJANGO_ALLOWED_HOSTS` | `localhost,127.0.0.1` | |
 | `DB_CONN_MAX_AGE` | `0` | persistent connections; keep 0 behind a pooler |
+| `GOOGLE_OAUTH_CLIENT_ID` | — | **Web** client; blank disables batch-2025 sign-in |
+| `GOOGLE_OAUTH_CLIENT_SECRET` | — | pairs with the above |
+| `GOOGLE_OAUTH_HOSTED_DOMAIN` | `pilani.bits-pilani.ac.in` | checked against the signed `hd` claim |
 | `DB_TRANSACTION_POOLER` | `False` | only for port 6543 |
 
 ### Agent (`local_agent`) — no `DATABASE_URL`, by design
@@ -772,6 +955,7 @@ cd core_django
 
 ../.venv/bin/python manage.py check_db     # verify the live DB is safe to send from
 ../.venv/bin/python manage.py seed_dev     # dev fixtures
+../.venv/bin/python manage.py issue_token <email> --label <name>   # shown once
 ../.venv/bin/python manage.py migrate
 ../.venv/bin/python manage.py makemigrations
 ```
@@ -798,7 +982,11 @@ All checks passed.
 ```
 ignite_crm/
 ├── conftest.py                    reports which DB tests chose
-├── docker-compose.yml             Postgres 16 for local dev and tests
+├── Dockerfile                     ONE image, both apps — see §13.1
+├── docker-compose.yml             postgres + crm, and agent behind a profile
+├── docker/
+│   ├── entrypoint-crm.sh          wait → migrate → check_db → seed → serve
+│   └── entrypoint-agent.sh        fail fast on a missing token
 ├── pytest.ini
 ├── requirements.txt
 ├── .env.example
@@ -815,20 +1003,20 @@ ignite_crm/
 │
 ├── core_django/
 │   ├── config/settings.py         DB config, Supabase notes, the test guard
-│   ├── Dockerfile
 │   └── crm/
+│       ├── auth_views.py          the login page and the two doors
 │       ├── models.py              canonical schema — the constraint lives here
 │       ├── validators.py          BITS email, phone, batch
 │       ├── forms.py               ContactForm, BulkEditForm, CampaignForm, …
 │       ├── views.py  urls.py      every screen
 │       ├── admin.py
-│       ├── services/              ← every rule (see §11)
+│       ├── services/              ← every rule (see §11), incl. auth.py
 │       ├── api/                   auth.py, views.py, urls.py
-│       ├── management/commands/   check_db.py, seed_dev.py
+│       ├── management/commands/   check_db.py, seed_dev.py, issue_token.py
 │       ├── migrations/            0001_initial, 0002_apitoken,
 │       │                          0003_contact_lifecycle_tags_archive
 │       ├── templates/crm/         14 templates
-│       └── tests/                 65 tests
+│       └── tests/                 76 tests
 │
 └── local_agent/
     ├── main.py                    lifespan identity checks + 12 routes
@@ -874,6 +1062,28 @@ is preferable to sending without a record.
 ---
 
 ## 22. Change log
+
+### Phase 3 — Docker, and passwordless sign-in
+
+- One root `Dockerfile` holding both apps; `core_django/Dockerfile` removed.
+  `docker/entrypoint-crm.sh` migrates, runs `check_db`, and **refuses to serve if
+  the constraint is missing**. See §13.1.
+- `manage.py issue_token` for bootstrapping an agent before anyone can log in.
+- `whitenoise` and `gunicorn` added to `requirements.txt` — `whitenoise` was
+  already in `MIDDLEWARE` and missing from the file.
+- **Passwords removed from the CRM.** New `services/auth.py` and `auth_views.py`:
+  batch 2024 picks a name, batch 2025 signs in with Google on the BITS domain.
+  Identity is now a session key holding a `TeamMember` id; `TeamMember.user` and
+  Django's `User` survive only for `/admin/`.
+- `member_required` / `lead_required` now redirect a stranger to `/login/` and
+  keep raising `PermissionDenied` for a real refusal.
+- 11 new tests in `test_login.py`; 76 total.
+- `migrate` and `seed_dev` now key off whether the database is local, so a
+  laptop pointed at the shared pool cannot reseed it or race a migration.
+  `check_db` still runs unconditionally and still fails the boot.
+- The local `postgres` container moved behind the `localdb` profile, and `crm`
+  dropped its `depends_on` in favour of the entrypoint's own wait — which works
+  for a hosted database too, where there is no container to depend on.
 
 ### Phase 2 — shared editing, lifecycle/tags, Supabase (commit `1aaf2df`)
 
@@ -934,9 +1144,12 @@ against `FakeGmail` mocks. Every other guarantee in this document is proven by a
 test; this one is proven by nothing. **Test it with a batch of one to your own
 address before pointing it at real prospects.**
 
-**Dev credentials are in the repo.** `docker-compose.yml` uses `ignite:ignite`
-and `seed_dev.py` uses `devpassword`. Both are localhost-only and harmless in
-development, but they are visible in a public org repo.
+**Dev credentials are in the repo.** `docker-compose.yml` uses `ignite:ignite`.
+Harmless on localhost, but visible in a public org repo.
+
+**The name door trusts the network.** Batch-2024 sign-in is a dropdown and a
+button (§4.1). That is a deliberate trade for a tool every lead runs on their own
+laptop, and it is wrong the moment the CRM gets a public hostname.
 
 **`bounced` is never set automatically.** Nothing reads bounce notifications;
 a lead sets it by hand. Inferring it from SMTP error strings was judged worse

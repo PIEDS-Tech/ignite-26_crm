@@ -15,27 +15,59 @@
 </head>
 <body>
 <div style="display:grid;place-items:center;min-height:100vh;padding:1.5rem">
-  <div class="card" style="width:100%;max-width:22rem">
+  <div class="card" style="width:100%;max-width:24rem">
     <header>
       <h2>Ignite CRM</h2>
       <p class="muted text-sm">PIEDS outreach — sign in to continue.</p>
     </header>
-    <section>
-      <form method="post" class="col">
-        {% csrf_token %}
-        {% if form.errors %}
-          <div class="alert alert-destructive"><section><p>Incorrect username or password.</p></section></div>
+
+    <section class="col" style="gap:1.25rem">
+
+      {% for message in messages %}
+        <div class="alert alert-destructive"><section><p>{{ message }}</p></section></div>
+      {% endfor %}
+
+      {# ---- batch 2025: Google, because the agent proves the same identity ---- #}
+      <div class="col" style="gap:.5rem">
+        <span class="label">Batch 2025</span>
+        {% if google_enabled %}
+          <a class="btn" href="{% url 'google_login' %}" style="width:100%;justify-content:center">
+            Sign in with your BITS Google account
+          </a>
+        {% else %}
+          <button class="btn" style="width:100%;justify-content:center" disabled>
+            Sign in with Google
+          </button>
+          <p class="muted text-sm">
+            Not configured on this machine — set <code>GOOGLE_OAUTH_CLIENT_ID</code>
+            and <code>GOOGLE_OAUTH_CLIENT_SECRET</code> in <code>.env</code>.
+          </p>
         {% endif %}
-        <div class="col" style="gap:.35rem">
-          <label class="label" for="id_username">Username</label>
-          <input class="input" type="text" name="username" id="id_username" autofocus required>
-        </div>
-        <div class="col" style="gap:.35rem">
-          <label class="label" for="id_password">Password</label>
-          <input class="input" type="password" name="password" id="id_password" required>
-        </div>
-        <button type="submit" class="btn">Sign in</button>
+      </div>
+
+      <hr>
+
+      {# ---- batch 2024: name only. Only reachable on your own machine. ---- #}
+      <form method="post" action="{% url 'login_by_name' %}" class="col" style="gap:.5rem">
+        {% csrf_token %}
+        <span class="label">Batch {{ lead_batch }} — leads</span>
+        {% if leads %}
+          <select class="select" name="member_id" aria-label="Your name" required>
+            {% for lead in leads %}
+              <option value="{{ lead.id }}">{{ lead.name }}</option>
+            {% endfor %}
+          </select>
+          <button type="submit" class="btn btn-outline" style="width:100%;justify-content:center">
+            Continue
+          </button>
+        {% else %}
+          <p class="muted text-sm">
+            No active batch-{{ lead_batch }} members yet. Add one in
+            <a href="/admin/">the admin</a> or run <code>manage.py seed_dev</code>.
+          </p>
+        {% endif %}
       </form>
+
     </section>
   </div>
 </div>

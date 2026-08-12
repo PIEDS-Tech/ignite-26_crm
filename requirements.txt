@@ -5,6 +5,9 @@ python-dotenv>=1.0
 # --- core_django (central admin) ---
 Django>=5.1,<6.0
 django-environ>=0.11
+# whitenoise is unconditionally in MIDDLEWARE, so it is required even in dev.
+whitenoise>=6.7
+gunicorn>=23.0
 
 # --- local_agent (FastAPI sending agent) ---
 fastapi>=0.115

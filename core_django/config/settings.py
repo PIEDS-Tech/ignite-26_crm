@@ -119,6 +119,20 @@ LOGIN_URL = "/login/"
 LOGIN_REDIRECT_URL = "/"
 LOGOUT_REDIRECT_URL = "/login/"
 
+# --- who may sign in ------------------------------------------------------
+# Batch 2024 picks a name; batch 2025 signs in with Google. The reasoning is in
+# crm/services/auth.py. This is a WEB OAuth client -- distinct from the DESKTOP
+# client the local agent uses for Gmail. Leaving these blank disables the Google
+# door and leaves a clear message on the login page rather than a stack trace.
+GOOGLE_OAUTH_CLIENT_ID = env("GOOGLE_OAUTH_CLIENT_ID", default="")
+GOOGLE_OAUTH_CLIENT_SECRET = env("GOOGLE_OAUTH_CLIENT_SECRET", default="")
+
+# Rejects personal Gmail even if it is somehow in the pool. Verified against the
+# signed `hd` claim, not the address string.
+GOOGLE_OAUTH_HOSTED_DOMAIN = env(
+    "GOOGLE_OAUTH_HOSTED_DOMAIN", default="pilani.bits-pilani.ac.in"
+)
+
 # --- production hardening -------------------------------------------------
 # Agents authenticate with a bearer token over the public internet, so TLS is
 # not optional once DEBUG is off.
