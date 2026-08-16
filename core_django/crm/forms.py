@@ -5,6 +5,7 @@ from shared.enums import ContactLifecycle
 from .models import Campaign, Contact, ContactNote, TeamMember
 from .services.campaigns import ALLOWED_VARIABLES, extract_placeholders
 from .services.contacts import clean_tags
+from .services.richtext import validate_links
 from .services.permissions import can_set_lifecycle, is_lead
 
 
@@ -82,6 +83,13 @@ class CampaignForm(BasecoatMixin, forms.ModelForm):
                 "var_list_raw",
                 "Declared but never used: " + ", ".join(sorted(unused)),
             )
+
+        # Same bargain as the placeholder checks above: a dead or unsafe link
+        # caught here is a red line under a text box; caught at send time it is
+        # a broken mail already sitting in a prospect's inbox.
+        for problem in validate_links(f"{probe.mail_sub}\n{probe.mail_body}"):
+            self.add_error("mail_body", problem)
+
         return cleaned
 
     def save(self, commit=True):

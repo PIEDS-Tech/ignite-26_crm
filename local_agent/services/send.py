@@ -75,7 +75,15 @@ def send_batch(api, gmail, campaign_id: str, contact_ids: list[str], *, delay=No
         }
 
         try:
-            result = gmail.send(to=item["to"], subject=item["subject"], body=item["body"])
+            # .get for body_html, not [...]: a laptop running an older agent
+            # against an updated server then sends plain text instead of
+            # crashing the whole batch on a KeyError.
+            result = gmail.send(
+                to=item["to"],
+                subject=item["subject"],
+                body=item["body"],
+                body_html=item.get("body_html", ""),
+            )
         except Exception as exc:
             detail = f"{type(exc).__name__}: {exc}"
             try:

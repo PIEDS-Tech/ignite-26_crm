@@ -69,7 +69,20 @@ def _load_credentials(email: str) -> Credentials:
         )
 
     flow = InstalledAppFlow.from_client_secrets_file(str(settings.client_secrets_path), SCOPES)
-    creds = flow.run_local_server(port=8080, prompt="consent")
+    try:
+        # port=0 asks the OS for any free port. A fixed port (this used to be
+        # 8080) fails with "Address already in use" whenever anything else on
+        # the laptop happens to hold it -- including a previous consent attempt
+        # that was abandoned mid-flow. Desktop OAuth clients accept any
+        # localhost port, so there is nothing to configure in Google Cloud.
+        creds = flow.run_local_server(port=0, prompt="consent")
+    except OSError as exc:
+        # Otherwise this escapes as a bare OSError and the UI shows a 500 with
+        # no indication that the problem is a socket, not Google.
+        raise GmailAuthError(
+            f"Could not start the local browser handshake: {exc}. "
+            "Close whatever is holding the port, or retry."
+        ) from exc
     _write_token(path, creds)
     return creds
 
@@ -115,12 +128,20 @@ class GmailClient:
             )
         return actual
 
-    def send(self, *, to: str, subject: str, body: str) -> SendResult:
+    def send(self, *, to: str, subject: str, body: str, body_html: str = "") -> SendResult:
         message = EmailMessage()
         message["To"] = to
         message["From"] = self.member_email
         message["Subject"] = subject
+
+        # Plain text first, then the HTML alternative. That ordering is what
+        # multipart/alternative means -- last part wins in clients that render
+        # HTML, and the text part is the fallback for those that do not. The
+        # server built both from the same body (see services/richtext.py), so
+        # they always say the same thing.
         message.set_content(body)
+        if body_html:
+            message.add_alternative(body_html, subtype="html")
 
         raw = base64.urlsafe_b64encode(message.as_bytes()).decode()
         sent = self.service.users().messages().send(userId="me", body={"raw": raw}).execute()

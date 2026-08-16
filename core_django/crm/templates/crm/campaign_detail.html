@@ -77,7 +77,20 @@
         <div class="text-xs muted mb-1">Subject</div>
         <div class="preview mb-2">{{ preview.subject }}</div>
         <div class="text-xs muted mb-1">Body</div>
-        <div class="preview">{{ preview.body }}</div>
+        {% if preview.body_html %}
+          {# The real HTML mail, in an iframe rather than injected into this
+             page: it renders the exact document Gmail will carry, isolated
+             from the CRM's own CSS. srcdoc is auto-escaped by Django, and the
+             sandbox is belt-and-braces -- to_html() emits no script. #}
+          <iframe class="preview preview-frame" sandbox="" title="Mail body preview"
+                  srcdoc="{{ preview.body_html }}"></iframe>
+          <details class="mt-1">
+            <summary class="text-xs muted">Plain-text fallback</summary>
+            <div class="preview mt-1">{{ preview.body }}</div>
+          </details>
+        {% else %}
+          <div class="preview">{{ preview.body }}</div>
+        {% endif %}
       {% endif %}
       <div class="text-xs muted mt-2">
         Variables: {{ campaign.var_list|join:", "|default:"none" }}

@@ -192,7 +192,12 @@ def preflight(request):
     if sample:
         contact = Contact.objects.get(id=sample["contact_id"])
         rendered = mailing_svc.render(campaign, contact)
-        preview = {"to": contact.email, "subject": rendered.subject, "body": rendered.body}
+        preview = {
+            "to": contact.email,
+            "subject": rendered.subject,
+            "body": rendered.body,
+            "body_html": rendered.body_html,
+        }
 
     return JsonResponse({
         "campaign": campaign.title,
@@ -252,6 +257,7 @@ def drafts(request):
             "name": m.contact.full_name,
             "subject": m.rendered_subject,
             "body": m.rendered_body,
+            "body_html": m.rendered_body_html,
             "created_at": m.created_at.isoformat(),
         }
         for m in mailing_svc.stranded_drafts(request.member)

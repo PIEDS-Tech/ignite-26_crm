@@ -10,6 +10,7 @@ can never disagree.
 from dataclasses import dataclass
 
 from .campaigns import ALLOWED_VARIABLES, PLACEHOLDER_RE
+from .richtext import to_html, to_plain
 
 
 class MissingVariables(Exception):
@@ -22,8 +23,15 @@ class MissingVariables(Exception):
 
 @dataclass
 class Rendered:
+    """What one contact actually receives.
+
+    Both bodies are carried, not one: the mail goes out as multipart/alternative
+    so a client that refuses HTML still gets `body`.
+    """
+
     subject: str
     body: str
+    body_html: str = ""
 
 
 def contact_context(contact) -> dict[str, str]:
@@ -59,4 +67,13 @@ def render(campaign, contact) -> Rendered:
     def substitute(text: str) -> str:
         return PLACEHOLDER_RE.sub(lambda m: ctx[m.group(1)], text)
 
-    return Rendered(subject=substitute(campaign.mail_sub), body=substitute(campaign.mail_body))
+    # Substitute first, convert second. Doing it this way round means every
+    # contact value passes through to_html's escaping; a company name with an
+    # `&` in it cannot break the markup. The cost is that a contact field
+    # literally containing `[x](y)` would turn into a link -- accepted.
+    body = substitute(campaign.mail_body)
+    return Rendered(
+        subject=substitute(campaign.mail_sub),
+        body=to_plain(body),
+        body_html=to_html(body),
+    )

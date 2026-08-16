@@ -59,6 +59,9 @@ class Claimed:
     name: str
     subject: str
     body: str
+    #: The HTML alternative. The agent sends it alongside `body` as
+    #: multipart/alternative; empty means send plain text only.
+    body_html: str = ""
 
 
 def load_sendable_campaign(campaign_id) -> Campaign:
@@ -192,6 +195,7 @@ def claim_batch(campaign, member, contact_ids) -> tuple[list[Claimed], list[Skip
                     status=MailingStatus.DRAFT.value,
                     rendered_subject=rendered.subject,
                     rendered_body=rendered.body,
+                    rendered_body_html=rendered.body_html,
                 )
         except Contact.DoesNotExist:
             skipped.append(Skipped(str(contact_id), "", "", "contact no longer exists"))
@@ -215,6 +219,7 @@ def claim_batch(campaign, member, contact_ids) -> tuple[list[Claimed], list[Skip
                 name=contact.full_name,
                 subject=rendered.subject,
                 body=rendered.body,
+                body_html=rendered.body_html,
             )
         )
 

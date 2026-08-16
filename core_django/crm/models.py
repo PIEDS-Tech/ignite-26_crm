@@ -301,6 +301,9 @@ class CampaignMailing(TimeStampedModel):
     # without this we could never answer "what did we actually send this person".
     rendered_subject = models.TextField(blank=True)
     rendered_body = models.TextField(blank=True)
+    # The HTML alternative, stored because it -- not rendered_body -- is what
+    # most recipients see. Blank for mailings sent before HTML bodies existed.
+    rendered_body_html = models.TextField(blank=True)
 
     error_detail = models.TextField(blank=True)
     sent_at = models.DateTimeField(null=True, blank=True)
