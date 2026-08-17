@@ -44,6 +44,16 @@
           Resolve stranded drafts
         </button>
       </section>
+      <section class="row wrap" style="gap:.5rem">
+        <label class="label text-xs" for="cc">CC</label>
+        <input class="input" id="cc" placeholder="comma-separated" style="min-width:14rem">
+        <label class="label text-xs" for="bcc">BCC</label>
+        <input class="input" id="bcc" placeholder="comma-separated" style="min-width:14rem">
+        <span class="text-xs muted">
+          Copied on <b>every</b> mail in the batch — 50 sends means 50 copies,
+          and CC'd addresses are visible to each prospect.
+        </span>
+      </section>
       <footer>
         <span class="text-xs muted" id="authState">
           Connected to {{ crm_url }} — verify Gmail before your first send.
@@ -261,6 +271,13 @@ function sync() {
   if (n === 0) $('sendBtn').disabled = true;
 }
 
+// Editing CC/BCC after a preflight would send addresses the dry run never
+// showed. Re-lock Send and make them preflight again, exactly as changing the
+// selection does.
+['cc', 'bcc'].forEach(id =>
+  document.addEventListener('DOMContentLoaded', () =>
+    $(id).addEventListener('input', () => { $('sendBtn').disabled = true; })));
+
 async function verifyAuth() {
   try {
     const d = await post('/auth/verify');
@@ -272,16 +289,27 @@ async function preflight() {
   const ids = chosen();
   if (!ids.length) return;
   try {
-    const d = await post('/api/preflight', { campaign_id: $('campaign').value, contact_ids: ids });
+    const d = await post('/api/preflight', {
+      campaign_id: $('campaign').value, contact_ids: ids,
+      cc: $('cc').value, bcc: $('bcc').value,
+    });
     d.outcomes.forEach(o => setStatus(o.contact_id, o.status, o.detail));
+
+    // The server echoes back the addresses it accepted. Showing those rather
+    // than what is typed in the boxes is the point of a dry run.
+    const copies = [
+      d.cc ? `CC ${d.cc}` : '', d.bcc ? `BCC ${d.bcc}` : '',
+    ].filter(Boolean).join(' · ');
 
     $('summary').innerHTML = `
       <div class="alert mb-2"><section><p>
         <b>${d.sendable}</b> sendable of ${ids.length} selected ·
-        ${d.remaining_today} left in today's quota
+        ${d.remaining_today} left in today's quota${copies ? ' · ' + copies : ''}
       </p></section></div>`;
 
     $('preview').innerHTML = d.preview ? `
+      <div class="text-xs muted mb-1">From</div>
+      <div class="preview mb-2">${d.preview.from_name}</div>
       <div class="text-xs muted mb-1">To</div>
       <div class="preview mb-2">${d.preview.to}</div>
       <div class="text-xs muted mb-1">Subject</div>
@@ -296,7 +324,12 @@ async function preflight() {
 
 async function send() {
   const ids = chosen();
-  if (!confirm(`Send to ${ids.length} contact(s)? This mails real people.`)) return;
+  const cc = $('cc').value.trim(), bcc = $('bcc').value.trim();
+  // Spelled out in the confirm: a CC left over from a previous batch is the
+  // easy mistake here, and it is unrecoverable once the mail is gone.
+  const copies = [cc ? `CC ${cc}` : '', bcc ? `BCC ${bcc}` : ''].filter(Boolean).join(', ');
+  const warning = copies ? `\n\nEvery one of them also copies: ${copies}` : '';
+  if (!confirm(`Send to ${ids.length} contact(s)? This mails real people.${warning}`)) return;
   $('sendBtn').disabled = true;
   // The NDJSON stream below writes per-row statuses as it goes; a background
   // refresh mid-stream would rebuild the table underneath it.
@@ -305,7 +338,7 @@ async function send() {
   try {
     const r = await fetch('/api/send', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ campaign_id: $('campaign').value, contact_ids: ids }),
+      body: JSON.stringify({ campaign_id: $('campaign').value, contact_ids: ids, cc, bcc }),
     });
     if (!r.ok) {
       const d = await r.json().catch(() => ({}));

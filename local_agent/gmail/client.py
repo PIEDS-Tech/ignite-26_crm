@@ -10,6 +10,7 @@ import json
 import os
 from dataclasses import dataclass
 from email.message import EmailMessage
+from email.utils import formataddr
 from pathlib import Path
 
 from google.auth.transport.requests import Request
@@ -128,11 +129,34 @@ class GmailClient:
             )
         return actual
 
-    def send(self, *, to: str, subject: str, body: str, body_html: str = "") -> SendResult:
+    def send(
+        self,
+        *,
+        to: str,
+        subject: str,
+        body: str,
+        body_html: str = "",
+        from_name: str = "",
+        cc: str = "",
+        bcc: str = "",
+    ) -> SendResult:
         message = EmailMessage()
         message["To"] = to
-        message["From"] = self.member_email
+
+        # `formataddr`, not an f-string: it quotes a name containing a comma or
+        # a period and RFC 2047-encodes a non-ASCII one. Hand-built From headers
+        # are how mail ends up displaying as `"Rao"" <addr>` in some clients.
+        # An empty name yields the bare address, unchanged from before.
+        message["From"] = formataddr((from_name, self.member_email)) if from_name \
+            else self.member_email
         message["Subject"] = subject
+
+        # Both are plain headers. Gmail strips Bcc before delivery, so the
+        # recipients never learn about each other.
+        if cc:
+            message["Cc"] = cc
+        if bcc:
+            message["Bcc"] = bcc
 
         # Plain text first, then the HTML alternative. That ordering is what
         # multipart/alternative means -- last part wins in clients that render

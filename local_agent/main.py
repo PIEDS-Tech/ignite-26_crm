@@ -129,11 +129,18 @@ def update_contact(contact_id: str, payload: dict):
 class SendRequest(BaseModel):
     campaign_id: str
     contact_ids: list[str]
+    #: Comma-separated, applied to every mail in the batch. Validated and
+    #: recorded by the server, which is the only thing that makes them real.
+    cc: str = ""
+    bcc: str = ""
 
 
 @app.post("/api/preflight")
 def preflight(payload: SendRequest):
-    return _guard(api().preflight, payload.campaign_id, payload.contact_ids)
+    return _guard(
+        api().preflight, payload.campaign_id, payload.contact_ids,
+        payload.cc, payload.bcc,
+    )
 
 
 @app.post("/api/send")
@@ -143,7 +150,8 @@ def send(payload: SendRequest):
     def stream():
         try:
             for outcome in send_svc.send_batch(
-                api(), gmail(), payload.campaign_id, payload.contact_ids
+                api(), gmail(), payload.campaign_id, payload.contact_ids,
+                cc=payload.cc, bcc=payload.bcc,
             ):
                 yield json.dumps(outcome.dict()) + "\n"
         except ApiError as exc:

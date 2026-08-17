@@ -72,17 +72,23 @@ class CrmClient:
 
     # ---- write ---------------------------------------------------------
 
-    def preflight(self, campaign_id: str, contact_ids: list[str]):
+    def preflight(self, campaign_id: str, contact_ids: list[str], cc: str = "", bcc: str = ""):
         return self._request(
             "POST", "/mailings/preflight",
-            json={"campaign_id": campaign_id, "contact_ids": contact_ids},
+            json={"campaign_id": campaign_id, "contact_ids": contact_ids,
+                  "cc": cc, "bcc": bcc},
         )
 
-    def claim(self, campaign_id: str, contact_ids: list[str]):
-        """Reserve mailings. Each returned item already has a durable DRAFT row."""
+    def claim(self, campaign_id: str, contact_ids: list[str], cc: str = "", bcc: str = ""):
+        """Reserve mailings. Each returned item already has a durable DRAFT row.
+
+        CC/BCC are sent for the server to validate and record, not applied here:
+        the laptop must not be able to copy an address the CRM has no note of.
+        """
         return self._request(
             "POST", "/mailings/claim",
-            json={"campaign_id": campaign_id, "contact_ids": contact_ids},
+            json={"campaign_id": campaign_id, "contact_ids": contact_ids,
+                  "cc": cc, "bcc": bcc},
         )
 
     def report_sent(self, mailing_id: str, message_id: str, thread_id: str):

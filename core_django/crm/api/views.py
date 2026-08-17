@@ -155,27 +155,40 @@ def _flatten(exc) -> list[str]:
 
 
 def _campaign_and_ids(request):
-    """Shared validation for preflight and claim."""
+    """Shared validation for preflight and claim.
+
+    Returns (campaign, contact_ids, copies, error). `copies` is the validated
+    {"cc", "bcc"} pair -- parsed here so a dry run and the real send can never
+    disagree about who gets copied.
+    """
     payload, error = parse_json(request)
     if error:
-        return None, None, error
+        return None, None, None, error
 
     contact_ids = payload.get("contact_ids") or []
     if not isinstance(contact_ids, list) or not contact_ids:
-        return None, None, json_error("contact_ids must be a non-empty list.")
+        return None, None, None, json_error("contact_ids must be a non-empty list.")
 
     try:
         campaign = mailing_svc.load_sendable_campaign(payload.get("campaign_id"))
     except mailing_svc.CampaignNotSendable as exc:
-        return None, None, json_error(str(exc))
+        return None, None, None, json_error(str(exc))
 
-    return campaign, contact_ids, None
+    try:
+        copies = {
+            "cc": mailing_svc.parse_copy_addresses(payload.get("cc")),
+            "bcc": mailing_svc.parse_copy_addresses(payload.get("bcc")),
+        }
+    except mailing_svc.InvalidCopyAddresses as exc:
+        return None, None, None, json_error(str(exc))
+
+    return campaign, contact_ids, copies, None
 
 
 @require_POST
 @api_token_required
 def preflight(request):
-    campaign, contact_ids, error = _campaign_and_ids(request)
+    campaign, contact_ids, copies, error = _campaign_and_ids(request)
     if error:
         return error
 
@@ -194,6 +207,7 @@ def preflight(request):
         rendered = mailing_svc.render(campaign, contact)
         preview = {
             "to": contact.email,
+            "from_name": member.display_name,
             "subject": rendered.subject,
             "body": rendered.body,
             "body_html": rendered.body_html,
@@ -202,6 +216,11 @@ def preflight(request):
     return JsonResponse({
         "campaign": campaign.title,
         "counts": counts,
+        # Echoed back validated, so the operator sees exactly who gets copied on
+        # every mail BEFORE committing to the send. That is the point of a dry run.
+        "cc": copies["cc"],
+        "bcc": copies["bcc"],
+        "from_name": member.display_name,
         "sendable": counts.get(mailing_svc.OK, 0),
         "remaining_today": mailing_svc.DAILY_SEND_CAP - mailing_svc.sent_last_24h(member),
         "preview": preview,
@@ -213,11 +232,13 @@ def preflight(request):
 @api_token_required
 def claim(request):
     """Reserve mailings. Every returned item has a committed DRAFT row."""
-    campaign, contact_ids, error = _campaign_and_ids(request)
+    campaign, contact_ids, copies, error = _campaign_and_ids(request)
     if error:
         return error
 
-    claimed, skipped = mailing_svc.claim_batch(campaign, request.member, contact_ids)
+    claimed, skipped = mailing_svc.claim_batch(
+        campaign, request.member, contact_ids, cc=copies["cc"], bcc=copies["bcc"]
+    )
     return JsonResponse({
         "claimed": [asdict(c) for c in claimed],
         "skipped": [asdict(s) for s in skipped],
@@ -258,6 +279,9 @@ def drafts(request):
             "subject": m.rendered_subject,
             "body": m.rendered_body,
             "body_html": m.rendered_body_html,
+            "from_name": m.from_name,
+            "cc": m.cc,
+            "bcc": m.bcc,
             "created_at": m.created_at.isoformat(),
         }
         for m in mailing_svc.stranded_drafts(request.member)

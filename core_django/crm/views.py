@@ -469,6 +469,24 @@ def member_list(request):
 
 @lead_required
 @require_POST
+def member_sender_name(request, pk):
+    """Set what a member's recipients see in the From line.
+
+    Lead-only: this is the name a cold prospect judges the mail by, so it is not
+    something an individual member changes on their own laptop. Blank clears it
+    and falls back to the member's real name.
+    """
+    member = get_object_or_404(TeamMember, pk=pk)
+    member.sender_name = (request.POST.get("sender_name") or "").strip()[:120]
+    member.save(update_fields=["sender_name", "updated_at"])
+    messages.success(
+        request, f"{member.name} now sends as “{member.display_name}”."
+    )
+    return redirect("crm:member_list")
+
+
+@lead_required
+@require_POST
 def token_issue(request):
     form = TokenForm(request.POST, members=TeamMember.objects.filter(is_active=True))
     if not form.is_valid():

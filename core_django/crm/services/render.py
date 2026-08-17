@@ -67,13 +67,18 @@ def render(campaign, contact) -> Rendered:
     def substitute(text: str) -> str:
         return PLACEHOLDER_RE.sub(lambda m: ctx[m.group(1)], text)
 
-    # Substitute first, convert second. Doing it this way round means every
-    # contact value passes through to_html's escaping; a company name with an
+    # Substitute first, convert second. In the default mode that means every
+    # contact value passes through to_html's escaping, so a company name with an
     # `&` in it cannot break the markup. The cost is that a contact field
     # literally containing `[x](y)` would turn into a link -- accepted.
+    #
+    # With `is_html` on, that escaping is gone and a contact field containing
+    # markup is trusted. Acceptable: contacts are typed in by the same team that
+    # writes the campaigns, and the CSV importer is lead-only.
+    raw = bool(getattr(campaign, "is_html", False))
     body = substitute(campaign.mail_body)
     return Rendered(
         subject=substitute(campaign.mail_sub),
-        body=to_plain(body),
-        body_html=to_html(body),
+        body=to_plain(body, raw=raw),
+        body_html=to_html(body, raw=raw),
     )

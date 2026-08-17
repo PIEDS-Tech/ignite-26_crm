@@ -46,6 +46,14 @@ class TeamMember(TimeStampedModel):
     )
     phone = models.CharField(max_length=10, validators=[phone_validator], blank=True)
     linkedin = models.URLField(blank=True)
+    sender_name = models.CharField(
+        max_length=120,
+        blank=True,
+        help_text=(
+            "Shown as the sender in the recipient's inbox. Blank uses the member's name. "
+            "A bare address in a cold mail is far less likely to be opened."
+        ),
+    )
     batch = models.CharField(
         max_length=4,
         validators=[batch_validator],
@@ -70,6 +78,11 @@ class TeamMember(TimeStampedModel):
 
     def __str__(self):
         return f"{self.name} ({self.batch})"
+
+    @property
+    def display_name(self) -> str:
+        """What a recipient sees in the From line."""
+        return self.sender_name or self.name
 
 
 class ApiToken(TimeStampedModel):
@@ -258,6 +271,12 @@ class Campaign(TimeStampedModel):
     title = models.CharField(max_length=200)
     mail_sub = models.CharField(max_length=300, help_text="Supports {{ variable }} placeholders.")
     mail_body = models.TextField(help_text="Supports {{ variable }} placeholders.")
+    #: Opt-in, not automatic. Turning this on for every campaign would break
+    #: any existing body whose prose contains a bare `<` or `&`.
+    is_html = models.BooleanField(
+        default=False,
+        help_text="Write raw HTML in the body -- footers, styling, dividers.",
+    )
     var_list = models.JSONField(
         default=list,
         blank=True,
@@ -304,6 +323,13 @@ class CampaignMailing(TimeStampedModel):
     # The HTML alternative, stored because it -- not rendered_body -- is what
     # most recipients see. Blank for mailings sent before HTML bodies existed.
     rendered_body_html = models.TextField(blank=True)
+
+    # The rest of the envelope, snapshotted for the same reason as the body:
+    # "who did we actually copy on this" must be answerable months later, and a
+    # member's sender name can change between one send and the next.
+    from_name = models.CharField(max_length=120, blank=True)
+    cc = models.CharField(max_length=500, blank=True)
+    bcc = models.CharField(max_length=500, blank=True)
 
     error_detail = models.TextField(blank=True)
     sent_at = models.DateTimeField(null=True, blank=True)

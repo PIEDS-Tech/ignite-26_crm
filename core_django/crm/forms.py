@@ -5,7 +5,7 @@ from shared.enums import ContactLifecycle
 from .models import Campaign, Contact, ContactNote, TeamMember
 from .services.campaigns import ALLOWED_VARIABLES, extract_placeholders
 from .services.contacts import clean_tags
-from .services.richtext import validate_links
+from .services.richtext import validate_links, validate_markup
 from .services.permissions import can_set_lifecycle, is_lead
 
 
@@ -36,8 +36,9 @@ class CampaignForm(BasecoatMixin, forms.ModelForm):
 
     class Meta:
         model = Campaign
-        fields = ["title", "mail_sub", "mail_body"]
+        fields = ["title", "mail_sub", "mail_body", "is_html"]
         widgets = {"mail_body": forms.Textarea(attrs={"rows": 14})}
+        labels = {"is_html": "Body contains HTML"}
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -89,6 +90,12 @@ class CampaignForm(BasecoatMixin, forms.ModelForm):
         # a broken mail already sitting in a prospect's inbox.
         for problem in validate_links(f"{probe.mail_sub}\n{probe.mail_body}"):
             self.add_error("mail_body", problem)
+
+        # Only when the author asked for raw HTML. Without the checkbox the body
+        # is escaped anyway, so `<script>` there is literal text and harmless.
+        if cleaned.get("is_html"):
+            for problem in validate_markup(cleaned.get("mail_body") or ""):
+                self.add_error("mail_body", problem)
 
         return cleaned
 

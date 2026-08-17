@@ -45,7 +45,8 @@ def _skip_status(reason: str) -> str:
     return FAILED
 
 
-def send_batch(api, gmail, campaign_id: str, contact_ids: list[str], *, delay=None):
+def send_batch(api, gmail, campaign_id: str, contact_ids: list[str], *,
+               cc: str = "", bcc: str = "", delay=None):
     """Claim, send, report. Yields an Outcome per contact as it resolves.
 
     One failure never aborts the batch, and every claimed mailing gets a result
@@ -54,7 +55,7 @@ def send_batch(api, gmail, campaign_id: str, contact_ids: list[str], *, delay=No
     """
     delay = settings.send_delay_seconds if delay is None else delay
 
-    response = api.claim(campaign_id, contact_ids)
+    response = api.claim(campaign_id, contact_ids, cc=cc, bcc=bcc)
 
     # Report everything the server refused before touching Gmail.
     for skip in response["skipped"]:
@@ -83,6 +84,12 @@ def send_batch(api, gmail, campaign_id: str, contact_ids: list[str], *, delay=No
                 subject=item["subject"],
                 body=item["body"],
                 body_html=item.get("body_html", ""),
+                # The envelope is the server's word, not the laptop's: it
+                # validated these addresses and already recorded them on the
+                # DRAFT row before handing them back here.
+                from_name=item.get("from_name", ""),
+                cc=item.get("cc", ""),
+                bcc=item.get("bcc", ""),
             )
         except Exception as exc:
             detail = f"{type(exc).__name__}: {exc}"

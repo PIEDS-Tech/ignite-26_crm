@@ -6,17 +6,28 @@ here -- the form's validation and the send-time conversion both import from
 this module, exactly as they both import PLACEHOLDER_RE from campaigns.py, so
 "what the form accepted" and "what went out" can never drift apart.
 
-Why a markdown subset rather than a rich-text editor: we generate the HTML
-ourselves from a syntax we control, so there is no untrusted HTML to sanitise
-and no sanitiser dependency to keep current. That guarantee rests entirely on
-to_html() escaping every piece it did not itself write. Do not weaken it.
+Why a markdown subset rather than a rich-text editor: in the default mode we
+generate the HTML ourselves from a syntax we control, so there is nothing
+untrusted to sanitise and no sanitiser dependency to keep current. That rests
+entirely on to_html() escaping every piece it did not itself write. Do not
+weaken it.
+
+RAW MODE (`raw=True`, driven by the campaign's `is_html` checkbox) deliberately
+suspends that: the body is passed through untouched so a lead can write a
+footer, a divider, or inline styling. The trust boundary moves rather than
+disappearing -- campaign editing is @lead_required, and the only place the CRM
+renders this HTML is the campaign_detail preview, inside a `sandbox=""` iframe
+that cannot run script. Mail clients strip script themselves. CampaignForm
+additionally refuses `<script>` and inline event handlers, so the sandboxed
+preview cannot quietly disagree with what an inbox will do.
 """
 
+import html
 import re
 
 from django.core.exceptions import ValidationError
 from django.core.validators import URLValidator
-from django.utils.html import escape
+from django.utils.html import escape, strip_tags
 
 #: `[label](url)`. The label forbids brackets so nesting cannot be attempted,
 #: and the URL forbids whitespace so an unclosed paren fails to match rather
@@ -77,37 +88,78 @@ def validate_links(text: str) -> list[str]:
     return problems
 
 
-def to_plain(text: str) -> str:
+#: Script and inline event handlers. A mail client strips both, so they can only
+#: ever mislead: the campaign preview would show behaviour no recipient gets.
+_SCRIPT_RE = re.compile(r"<\s*script\b", re.I)
+_HANDLER_RE = re.compile(r"<[^>]*?\son[a-z]+\s*=", re.I | re.S)
+
+
+def validate_markup(text: str) -> list[str]:
+    """Problems with raw HTML in a body. Only consulted when `is_html` is on."""
+    problems = []
+    if _SCRIPT_RE.search(text or ""):
+        problems.append(
+            "<script> is not allowed: every mail client strips it, so it would "
+            "only make the preview lie about what recipients see."
+        )
+    if _HANDLER_RE.search(text or ""):
+        problems.append(
+            "Inline event handlers (onclick=, onload=, ...) are not allowed, "
+            "for the same reason as <script>."
+        )
+    return problems
+
+
+def to_plain(text: str, raw: bool = False) -> str:
     """`[book a call](https://x)` -> `book a call (https://x)`.
 
     The text/plain alternative must not be lossy: a client that refuses HTML
     still has to be able to reach the link, so the URL stays visible.
+
+    In raw mode the body is markup, so the tags come out and their entities go
+    back to being characters -- a fallback full of `<td>` and `&amp;` reads
+    worse than no fallback at all.
     """
-    return LINK_RE.sub(lambda m: f"{m.group(1).strip()} ({m.group(2)})", text or "")
+    plain = LINK_RE.sub(lambda m: f"{m.group(1).strip()} ({m.group(2)})", text or "")
+    if raw:
+        plain = html.unescape(strip_tags(plain))
+    return plain
 
 
-def to_html(text: str) -> str:
+def to_html(text: str, raw: bool = False) -> str:
     """Render the body as a full HTML document.
 
-    Every run of ordinary text, every link label, and every href is escaped
-    before it is interpolated. That is what makes this safe to mark |safe in
-    the preview and to hand to Gmail without a sanitiser.
+    Default mode: every run of ordinary text, every link label, and every href
+    is escaped before it is interpolated, and newlines become <br>. That is what
+    makes the output safe to preview and to hand to Gmail without a sanitiser.
+
+    Raw mode: ordinary text passes through as the markup it is, and newlines are
+    left alone -- an author writing <p> and <br> themselves does not want a
+    second set inserted underneath. Link syntax still works in both modes, and
+    its href is still escaped either way; there is no reason to hand-write an
+    anchor just because the rest of the body is HTML.
     """
     out: list[str] = []
     cursor = 0
     text = text or ""
 
+    def passthrough(chunk: str) -> str:
+        return chunk if raw else escape(chunk)
+
     for match in LINK_RE.finditer(text):
-        out.append(escape(text[cursor:match.start()]))
+        out.append(passthrough(text[cursor:match.start()]))
         label, url = match.group(1).strip(), match.group(2)
-        out.append(f'<a href="{escape(url)}">{escape(label)}</a>')
+        out.append(f'<a href="{escape(url)}">{passthrough(label)}</a>')
         cursor = match.end()
 
-    out.append(escape(text[cursor:]))
+    out.append(passthrough(text[cursor:]))
 
-    # Escaping first and converting newlines second: the reverse would let a
-    # <br> we just inserted be escaped back into visible text.
-    body = "".join(out).replace("\n", "<br>\n")
+    body = "".join(out)
+    if not raw:
+        # Escaping first and converting newlines second: the reverse would let a
+        # <br> we just inserted be escaped back into visible text.
+        body = body.replace("\n", "<br>\n")
+
     return (
         '<!doctype html><html><body style="' + _BODY_STYLE + '">\n'
         + body

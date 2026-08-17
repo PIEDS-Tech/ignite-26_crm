@@ -10,6 +10,8 @@ Read the ordering comments before changing anything.
 from dataclasses import dataclass
 from datetime import timedelta
 
+from django.core.exceptions import ValidationError as DjangoValidationError
+from django.core.validators import validate_email
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
@@ -38,9 +40,46 @@ FAILED = "FAILED"
 #: for hours. Enforced server-side so it counts across every device a member uses.
 DAILY_SEND_CAP = 400
 
+#: CC/BCC apply to EVERY mail in a batch, so ten copied addresses on a 200-mail
+#: send is two thousand extra deliveries. Small enough to keep that a decision
+#: rather than an accident -- and a pasted contact list will not fit through it.
+MAX_COPY_ADDRESSES = 10
+
 
 class CampaignNotSendable(Exception):
     pass
+
+
+class InvalidCopyAddresses(Exception):
+    """A CC/BCC list the server refuses. Reported before anything is claimed."""
+
+
+def parse_copy_addresses(raw) -> str:
+    """Normalise a comma-separated CC/BCC list, or refuse it.
+
+    Returns the cleaned string to store and send. Lives here beside claim_batch
+    rather than in the API layer so preflight and claim cannot disagree about
+    which addresses are acceptable.
+    """
+    if not raw:
+        return ""
+    if not isinstance(raw, str):
+        raise InvalidCopyAddresses("cc and bcc must be comma-separated strings.")
+
+    addresses = [part.strip() for part in raw.split(",") if part.strip()]
+    if len(addresses) > MAX_COPY_ADDRESSES:
+        raise InvalidCopyAddresses(
+            f"At most {MAX_COPY_ADDRESSES} addresses; got {len(addresses)}. "
+            "Remember these are copied on every mail in the batch."
+        )
+
+    for address in addresses:
+        try:
+            validate_email(address)
+        except DjangoValidationError:
+            raise InvalidCopyAddresses(f"{address!r} is not a valid email address.")
+
+    return ", ".join(addresses)
 
 
 @dataclass
@@ -62,6 +101,11 @@ class Claimed:
     #: The HTML alternative. The agent sends it alongside `body` as
     #: multipart/alternative; empty means send plain text only.
     body_html: str = ""
+    #: The rest of the envelope, decided here rather than on the laptop. The
+    #: agent sets no recipient the server has not already recorded.
+    from_name: str = ""
+    cc: str = ""
+    bcc: str = ""
 
 
 def load_sendable_campaign(campaign_id) -> Campaign:
@@ -131,7 +175,7 @@ def preflight(campaign, member, contact_ids) -> list[dict]:
     return results
 
 
-def claim_batch(campaign, member, contact_ids) -> tuple[list[Claimed], list[Skipped]]:
+def claim_batch(campaign, member, contact_ids, *, cc="", bcc="") -> tuple[list[Claimed], list[Skipped]]:
     """Reserve mailings for an agent to send.
 
     One transaction PER CONTACT, each committed before the agent is told about
@@ -142,6 +186,12 @@ def claim_batch(campaign, member, contact_ids) -> tuple[list[Claimed], list[Skip
     """
     claimed: list[Claimed] = []
     skipped: list[Skipped] = []
+
+    # Raises before any row is written: a malformed CC must fail the whole
+    # request, not leave half a batch claimed with the copy silently dropped.
+    cc = parse_copy_addresses(cc)
+    bcc = parse_copy_addresses(bcc)
+    from_name = member.display_name
 
     budget = DAILY_SEND_CAP - sent_last_24h(member)
 
@@ -196,6 +246,9 @@ def claim_batch(campaign, member, contact_ids) -> tuple[list[Claimed], list[Skip
                     rendered_subject=rendered.subject,
                     rendered_body=rendered.body,
                     rendered_body_html=rendered.body_html,
+                    from_name=from_name,
+                    cc=cc,
+                    bcc=bcc,
                 )
         except Contact.DoesNotExist:
             skipped.append(Skipped(str(contact_id), "", "", "contact no longer exists"))
@@ -220,6 +273,9 @@ def claim_batch(campaign, member, contact_ids) -> tuple[list[Claimed], list[Skip
                 subject=rendered.subject,
                 body=rendered.body,
                 body_html=rendered.body_html,
+                from_name=from_name,
+                cc=cc,
+                bcc=bcc,
             )
         )
 
