@@ -6,11 +6,18 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from django.views.decorators.http import require_POST
 
-from shared.enums import CampaignStatus, ContactLifecycle, MailingStatus
+from shared.enums import (
+    TERMINAL_SCHEDULE_STATUSES,
+    CampaignStatus,
+    ContactLifecycle,
+    MailingStatus,
+    ScheduleStatus,
+)
 
 from .forms import BulkEditForm, CampaignForm, ContactForm, CsvUploadForm, NoteForm, TokenForm
-from .models import ApiToken, Campaign, CampaignMailing, Contact, TeamMember
+from .models import ApiToken, Campaign, CampaignMailing, Contact, ScheduledSend, TeamMember
 from .services import assignment, importer
+from .services import scheduling as schedule_svc
 from .services import campaigns as campaign_svc
 from .services import contacts as contact_svc
 from .services.permissions import (
@@ -452,6 +459,55 @@ def campaign_transition(request, pk):
         detail = "; ".join(exc.messages) if isinstance(exc, ValidationError) else str(exc)
         messages.error(request, detail)
     return redirect("crm:campaign_detail", pk=pk)
+
+
+# ------------------------------------------------------------ scheduled sends
+
+@member_required
+def schedule_list(request):
+    """Every scheduled send, across the whole team.
+
+    This page exists because the executor is somebody's laptop or container. A
+    job that quietly never ran -- nothing was awake, the campaign got paused --
+    is invisible from the agent that queued it and dead obvious here. `missed`
+    and `failed` are surfaced first for exactly that reason.
+    """
+    jobs = ScheduledSend.objects.select_related("campaign", "member", "created_by")
+
+    status = request.GET.get("status", "open")
+    if status == "open":
+        jobs = jobs.exclude(status__in=TERMINAL_SCHEDULE_STATUSES)
+    elif status and status != "all":
+        jobs = jobs.filter(status=status)
+
+    needs_attention = ScheduledSend.objects.filter(
+        status__in=[ScheduleStatus.MISSED.value, ScheduleStatus.FAILED.value]
+    ).select_related("campaign", "member")[:10]
+
+    return render(request, "crm/schedule_list.html", _base(
+        request,
+        page=Paginator(jobs, 50).get_page(request.GET.get("page")),
+        needs_attention=needs_attention,
+        statuses=ScheduleStatus.choices(),
+        current_status=status,
+    ))
+
+
+@lead_required
+@require_POST
+def schedule_cancel(request, pk):
+    """Call off a queued send. Lead-only: it may be someone else's job."""
+    try:
+        job = schedule_svc.cancel(pk)
+    except schedule_svc.NotSchedulable as exc:
+        messages.error(request, str(exc))
+    else:
+        messages.success(
+            request,
+            f"Cancelled the {job.campaign.title!r} send for {job.member.name}. "
+            "Anything already sent stays sent.",
+        )
+    return redirect("crm:schedule_list")
 
 
 # ------------------------------------------------------------ team & tokens

@@ -407,3 +407,72 @@ def test_api_progress_and_cancel_round_trip(client, auth, campaign, member, cont
 
     r = _post(client, reverse("api:schedule_cancel", args=[job.id]), {}, auth)
     assert r.status_code == 400   # already done; nothing left to call off
+
+
+# ------------------------------------------------------- the CRM schedule page
+
+@pytest.fixture
+def lead():
+    return TeamMember.objects.create(
+        name="Aarav", bits_email="aarav@pilani.bits-pilani.ac.in", batch="2024"
+    )
+
+
+def sign_in(client, who):
+    session = client.session
+    session["member_id"] = str(who.id)
+    session.save()
+    return client
+
+
+def test_the_page_lists_open_jobs_and_hides_finished_ones(client, lead, campaign, member, contact):
+    """Default view is work still outstanding; finished jobs are on ?status=all.
+
+    Asserted on the rendered status classes rather than on primary keys: a
+    terminal job renders no cancel form, so its pk never reaches the HTML.
+    """
+    schedule(campaign, member, [contact])
+    done = schedule(campaign, member, [make_contact(member, 9)])
+    ScheduledSend.objects.filter(id=done.id).update(status=ScheduleStatus.DONE.value)
+
+    body = sign_in(client, lead).get(reverse("crm:schedule_list")).content.decode()
+    assert "s-PENDING" in body
+    assert "s-DONE" not in body
+
+    all_body = client.get(reverse("crm:schedule_list"), {"status": "all"}).content.decode()
+    assert "s-DONE" in all_body and "s-PENDING" in all_body
+
+
+def test_missed_jobs_are_called_out_at_the_top(client, lead, campaign, member, contact):
+    """The whole point of this page: mail that never went out must be loud."""
+    job = schedule(campaign, member, [contact])
+    ScheduledSend.objects.filter(id=job.id).update(
+        status=ScheduleStatus.MISSED.value, last_error="nothing executed it"
+    )
+
+    body = sign_in(client, lead).get(reverse("crm:schedule_list")).content.decode()
+    assert "need attention" in body
+    assert "nothing executed it" in body
+
+
+def test_a_lead_can_cancel_anyone_s_job(client, lead, campaign, member, contact):
+    job = schedule(campaign, member, [contact])
+    r = sign_in(client, lead).post(reverse("crm:schedule_cancel", args=[job.pk]))
+
+    assert r.status_code == 302
+    job.refresh_from_db()
+    assert job.status == ScheduleStatus.CANCELLED.value
+
+
+def test_a_member_may_look_but_not_cancel(client, campaign, member, contact):
+    """Cancelling someone else's send is a lead decision -- the job belongs to
+    another person's mailbox and may be half-sent."""
+    job = schedule(campaign, member, [contact])
+    sign_in(client, member)
+
+    assert client.get(reverse("crm:schedule_list")).status_code == 200
+
+    r = client.post(reverse("crm:schedule_cancel", args=[job.pk]))
+    assert r.status_code in (302, 403)
+    job.refresh_from_db()
+    assert job.status == ScheduleStatus.PENDING.value

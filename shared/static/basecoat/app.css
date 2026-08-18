@@ -139,6 +139,15 @@ td.shrink, th.shrink { width: 1%; white-space: nowrap }
 .s-ARCHIVED,
 .s-BLOCKED              { color: var(--color-destructive) }
 
+/* Scheduled-send states. MISSED and FAILED read as errors on purpose: mail
+   that never went out is the failure the schedule page exists to surface. */
+.s-DONE                 { color: var(--color-primary) }
+.s-PENDING              { color: var(--color-muted-foreground) }
+.s-RUNNING              { color: #2563eb }
+.s-HELD                 { color: #b45309 }
+.s-CANCELLED            { color: var(--color-muted-foreground) }
+.s-MISSED               { color: var(--color-destructive) }
+
 /* ---------- contact lifecycle badges ---------- */
 /* Colour carries meaning here: the two reds are the states that refuse mail. */
 

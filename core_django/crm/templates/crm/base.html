@@ -25,6 +25,7 @@
     <a href="{% url 'crm:home' %}" {% if request.resolver_match.url_name == 'home' %}aria-current="page"{% endif %}>Dashboard</a>
     <a href="{% url 'crm:contact_list' %}" {% if 'contact' in request.resolver_match.url_name %}aria-current="page"{% endif %}>Contacts</a>
     <a href="{% url 'crm:campaign_list' %}" {% if 'campaign' in request.resolver_match.url_name %}aria-current="page"{% endif %}>Campaigns</a>
+    <a href="{% url 'crm:schedule_list' %}" {% if 'schedule' in request.resolver_match.url_name %}aria-current="page"{% endif %}>Scheduled</a>
     {% if is_lead %}
       <a href="{% url 'crm:assign' %}" {% if request.resolver_match.url_name == 'assign' %}aria-current="page"{% endif %}>Assign</a>
       <a href="{% url 'crm:contact_import' %}" {% if request.resolver_match.url_name == 'contact_import' %}aria-current="page"{% endif %}>Import CSV</a>

@@ -1,0 +1,85 @@
+{% extends "crm/base.html" %}
+{% block title %}Scheduled sends — Ignite CRM{% endblock %}
+{% block heading %}Scheduled sends{% endblock %}
+
+{% block content %}
+{# Attention first. A job nothing executed is the failure mode this whole page
+   exists for, and burying it under a paginated table would defeat the point. #}
+{% if needs_attention %}
+  <div class="alert alert-destructive mb-3">
+    <section>
+      <p><strong>{{ needs_attention|length }} scheduled send(s) need attention.</strong></p>
+      <ul class="text-sm">
+        {% for j in needs_attention %}
+          <li>
+            {{ j.campaign.title }} for {{ j.member.name }},
+            due {{ j.scheduled_at|date:"d M H:i" }} — <b>{{ j.status }}</b>
+            {% if j.last_error %}({{ j.last_error|truncatechars:120 }}){% endif %}
+          </li>
+        {% endfor %}
+      </ul>
+      <p class="text-xs mt-1">
+        A send only goes out while an agent is running for that member. Nothing
+        listening when it fell due means nothing was sent.
+      </p>
+    </section>
+  </div>
+{% endif %}
+
+<div class="card mb-3">
+  <section class="row wrap" style="gap:.4rem">
+    <a class="btn-outline btn-sm{% if current_status == 'open' %} btn{% endif %}"
+       href="?status=open">Open</a>
+    <a class="btn-outline btn-sm{% if current_status == 'all' %} btn{% endif %}"
+       href="?status=all">All</a>
+    {% for value, label in statuses %}
+      <a class="btn-ghost btn-sm{% if current_status == value %} btn-outline{% endif %}"
+         href="?status={{ value }}">{{ label }}</a>
+    {% endfor %}
+  </section>
+</div>
+
+<div class="table-wrap" data-poll>
+  <table class="table">
+    <thead><tr>
+      <th>Campaign</th><th>Sends as</th><th>Due</th>
+      <th class="right shrink">Progress</th><th>Status</th><th class="shrink"></th>
+    </tr></thead>
+    <tbody>
+    {% for j in page %}
+      <tr>
+        <td>
+          <a href="{% url 'crm:campaign_detail' j.campaign.pk %}">{{ j.campaign.title }}</a>
+          {% if j.last_error %}<div class="text-xs muted">{{ j.last_error|truncatechars:90 }}</div>{% endif %}
+        </td>
+        <td class="text-sm">{{ j.member.name }}</td>
+        <td class="text-sm muted">{{ j.scheduled_at|date:"d M Y, H:i" }}</td>
+        <td class="right tabular text-sm">
+          {{ j.sent_count }} sent
+          {% if j.skipped_count %}<span class="muted">· {{ j.skipped_count }} skipped</span>{% endif %}
+          <div class="text-xs muted">{{ j.cursor }}/{{ j.total }}</div>
+        </td>
+        <td><span class="s-{{ j.status|upper }} text-sm font-medium">{{ j.status }}</span></td>
+        <td>
+          {% if is_lead and not j.is_terminal %}
+            <form method="post" action="{% url 'crm:schedule_cancel' j.pk %}"
+                  onsubmit="return confirm('Cancel this scheduled send? Anything already sent stays sent.')">
+              {% csrf_token %}
+              <button type="submit" class="btn-ghost btn-sm">Cancel</button>
+            </form>
+          {% endif %}
+        </td>
+      </tr>
+    {% empty %}
+      <tr><td colspan="6" class="empty">Nothing scheduled.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{% include "crm/_pagination.html" %}
+{% endblock %}
+
+{% block scripts %}
+<script>window.addEventListener('load', () => Poll.page());</script>
+{% endblock %}
