@@ -583,3 +583,95 @@ def test_a_running_job_is_not_swept_out_from_under_its_agent(campaign, member, c
     assert svc.sweep_missed(now=timezone.now() + timedelta(days=2)) == 0
     job.refresh_from_db()
     assert job.status == ScheduleStatus.RUNNING.value
+
+
+# ------------------------------------------------------------ drip / throttle
+
+def test_a_drip_hands_out_one_batch_at_a_time(campaign, member):
+    contacts = [make_contact(member, i) for i in range(5)]
+    job = svc.create(
+        campaign_id=campaign.id, member=member, contact_ids=[c.id for c in contacts],
+        scheduled_at=timezone.now() + timedelta(hours=1),
+        batch_size=2, interval_minutes=30,
+    )
+    ScheduledSend.objects.filter(id=job.id).update(scheduled_at=due_now())
+
+    claimed = svc.claim_due(member)
+    assert claimed[0].next_slice(claimed[0].batch_size) == [str(c.id) for c in contacts[:2]]
+
+
+def test_a_drip_waits_its_interval_before_the_next_batch(campaign, member):
+    contacts = [make_contact(member, i) for i in range(5)]
+    job = svc.create(
+        campaign_id=campaign.id, member=member, contact_ids=[c.id for c in contacts],
+        scheduled_at=timezone.now() + timedelta(hours=1),
+        batch_size=2, interval_minutes=30,
+    )
+    ScheduledSend.objects.filter(id=job.id).update(scheduled_at=due_now())
+    svc.claim_due(member)
+    svc.record_progress(job.id, member, attempted=2, sent=2, skipped=0)
+
+    job.refresh_from_db()
+    assert job.status == ScheduleStatus.PENDING.value
+    assert job.next_run_at is not None
+    assert svc.claim_due(member) == []                       # too soon
+
+    # Half an hour on, the next batch is fair game.
+    later = timezone.now() + timedelta(minutes=31)
+    assert len(svc.claim_due(member, now=later)) == 1
+
+
+def test_a_drip_terminates_after_the_last_batch(campaign, member):
+    contacts = [make_contact(member, i) for i in range(3)]
+    job = svc.create(
+        campaign_id=campaign.id, member=member, contact_ids=[c.id for c in contacts],
+        scheduled_at=timezone.now() + timedelta(hours=1),
+        batch_size=2, interval_minutes=1,
+    )
+    ScheduledSend.objects.filter(id=job.id).update(scheduled_at=due_now())
+
+    svc.claim_due(member)
+    svc.record_progress(job.id, member, attempted=2, sent=2, skipped=0)
+    svc.claim_due(member, now=timezone.now() + timedelta(minutes=2))
+    svc.record_progress(job.id, member, attempted=1, sent=1, skipped=0)
+
+    job.refresh_from_db()
+    assert job.status == ScheduleStatus.DONE.value
+    assert job.next_run_at is None and job.sent_count == 3
+
+
+def test_a_batch_size_without_an_interval_is_refused(campaign, member, contact):
+    """Otherwise it would drain the list on consecutive ticks -- the opposite
+    of dripping, with none of the safety."""
+    with pytest.raises(svc.NotSchedulable):
+        svc.create(
+            campaign_id=campaign.id, member=member, contact_ids=[contact.id],
+            scheduled_at=timezone.now() + timedelta(hours=1), batch_size=10,
+        )
+
+
+def test_a_drip_in_flight_is_not_declared_missed(window, campaign, member):
+    """Its deadline moves with each batch: a job spreading over two days is not
+    six hours late on day two."""
+    contacts = [make_contact(member, i) for i in range(4)]
+    job = svc.create(
+        campaign_id=campaign.id, member=member, contact_ids=[c.id for c in contacts],
+        scheduled_at=timezone.now() + timedelta(hours=1), batch_size=2, interval_minutes=60,
+    )
+    # Wind the clock back on the row: it began at 10:00 and has one batch done,
+    # so the next is owed at 11:00.
+    ScheduledSend.objects.filter(id=job.id).update(
+        scheduled_at=at(10, 0), next_run_at=at(11, 0)
+    )
+    job.refresh_from_db()
+
+    assert svc.is_missed(job, now=at(12, 0)) is False
+    assert svc.is_missed(job, now=at(18, 0)) is True          # 11:00 + 6h
+
+
+def test_the_scheduler_stands_down_when_the_daily_cap_is_spent(campaign, member, contact, monkeypatch):
+    """Leasing jobs the cap will refuse burns attempts and reads as failure
+    rather than as a quota."""
+    schedule(campaign, member, [contact], when=due_now())
+    monkeypatch.setattr(svc, "remaining_quota", lambda m: 0)
+    assert svc.claim_due(member) == []

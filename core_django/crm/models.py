@@ -391,6 +391,20 @@ class ScheduledSend(TimeStampedModel):
     cursor = models.PositiveIntegerField(default=0)
 
     scheduled_at = models.DateTimeField(db_index=True)
+
+    # --- drip ------------------------------------------------------------
+    # Zero batch_size means "the whole thing at once", which is the one-off
+    # send. Anything else spreads the job across ticks: 200 mails leaving one
+    # mailbox in one minute is both a deliverability signal and an unrecoverable
+    # mistake if the template was wrong.
+    batch_size = models.PositiveIntegerField(
+        default=0, help_text="Contacts per run. 0 sends the whole selection at once."
+    )
+    interval_minutes = models.PositiveIntegerField(
+        default=0, help_text="Wait between batches. Ignored unless batch_size is set."
+    )
+    #: When the next slice may go. Set after each batch; null means "now".
+    next_run_at = models.DateTimeField(null=True, blank=True, db_index=True)
     status = models.CharField(
         max_length=12,
         choices=ScheduleStatus.choices(),

@@ -19,6 +19,7 @@ from datetime import timedelta
 
 from django.conf import settings
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from crm.models import Campaign, ScheduledSend
@@ -40,10 +41,20 @@ class NotSchedulable(Exception):
     """The job cannot be created or run as asked. Message is user-facing."""
 
 
+def remaining_quota(member) -> int:
+    """How many more mails this member may send in the next 24h.
+
+    Read from mailing.py rather than re-derived: one definition of the cap, and
+    it already counts across every device the member uses.
+    """
+    from .mailing import DAILY_SEND_CAP, sent_last_24h
+    return DAILY_SEND_CAP - sent_last_24h(member)
+
+
 # ------------------------------------------------------------------ creating
 
 def create(*, campaign_id, member, contact_ids, scheduled_at, cc="", bcc="",
-           created_by=None, now=None) -> ScheduledSend:
+           batch_size=0, interval_minutes=0, created_by=None, now=None) -> ScheduledSend:
     """Queue a send. Validates everything that can be known up front.
 
     Deliberately NOT validated here: whether each contact is still assigned,
@@ -91,6 +102,13 @@ def create(*, campaign_id, member, contact_ids, scheduled_at, cc="", bcc="",
             seen.add(key)
             ordered.append(key)
 
+    batch_size = max(0, int(batch_size or 0))
+    interval_minutes = max(0, int(interval_minutes or 0))
+    if batch_size and not interval_minutes:
+        # A batch size with no interval would drain the whole list on
+        # consecutive ticks, which is the opposite of dripping.
+        raise NotSchedulable("A drip needs an interval between batches.")
+
     return ScheduledSend.objects.create(
         campaign=campaign,
         member=member,
@@ -99,6 +117,8 @@ def create(*, campaign_id, member, contact_ids, scheduled_at, cc="", bcc="",
         scheduled_at=scheduled_at,
         cc=cc,
         bcc=bcc,
+        batch_size=batch_size,
+        interval_minutes=interval_minutes,
         status=ScheduleStatus.PENDING.value,
     )
 
@@ -162,14 +182,17 @@ def next_open_slot(moment):
 
 
 def deliver_after(job, now=None):
-    """The earliest moment this job is allowed to go out.
+    """The earliest moment this job's NEXT slice is allowed to go out.
 
     Usually the scheduled time. When that lands outside the sending window it
     is pushed to the next open slot -- and the grace window is measured from
     THIS value rather than from scheduled_at, so a job deferred overnight is not
     declared missed for a lateness it was never permitted to avoid.
+
+    A drip in progress uses next_run_at instead, so its deadline moves with it:
+    a job spreading 200 mails over two days is not "six hours late" on day two.
     """
-    return next_open_slot(job.scheduled_at)
+    return next_open_slot(job.next_run_at or job.scheduled_at)
 
 
 def deadline(job, hours=None, now=None):
@@ -272,8 +295,17 @@ def claim_due(member, agent_id="", limit=5, now=None) -> list[ScheduledSend]:
             status__in=[ScheduleStatus.PENDING.value, ScheduleStatus.HELD.value],
             scheduled_at__lte=now,
         )
+        # A drip mid-flight waits for its interval; everything else is eligible
+        # the moment it is due.
+        .filter(Q(next_run_at__isnull=True) | Q(next_run_at__lte=now))
         .order_by("scheduled_at")[:limit]
     )
+
+    # The daily cap is enforced by claim_batch per contact, but a scheduler that
+    # ignores it would lease job after job only to have every mail refused, burn
+    # the attempts counter, and look like a failure rather than a quota.
+    if remaining_quota(member) <= 0:
+        return []
 
     claimed = []
     for job in candidates:
@@ -368,11 +400,15 @@ def record_progress(job_id, member, *, attempted, sent, skipped, error="", now=N
         job.finished_at = now
         job.leased_by = ""
         job.lease_expires_at = None
+        job.next_run_at = None
     else:
         # More to do on a later tick. Back to PENDING so any agent of this
         # member's can pick up the next slice.
         job.status = ScheduleStatus.PENDING.value
         job.lease_expires_at = None
+        job.leased_by = ""
+        if job.interval_minutes:
+            job.next_run_at = now + timedelta(minutes=job.interval_minutes)
 
     job.save()
     return {"status": job.status, "cursor": job.cursor, "remaining": job.remaining}
@@ -472,6 +508,9 @@ def as_json(job) -> dict:
         "skipped_count": job.skipped_count,
         "cc": job.cc,
         "bcc": job.bcc,
+        "batch_size": job.batch_size,
+        "interval_minutes": job.interval_minutes,
+        "next_run_at": job.next_run_at.isoformat() if job.next_run_at else None,
         "last_error": job.last_error,
         "created_at": job.created_at.isoformat(),
     }

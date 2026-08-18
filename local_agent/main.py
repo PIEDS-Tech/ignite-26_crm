@@ -222,6 +222,9 @@ class ScheduleRequest(SendRequest):
     #: ISO 8601 WITH an offset. The browser builds it from a local date+time,
     #: so the offset is what stops "09:00" meaning 09:00 UTC on the server.
     scheduled_at: str
+    #: 0 sends the whole selection at once; anything else drips it.
+    batch_size: int = 0
+    interval_minutes: int = 0
 
 
 @app.get("/api/schedules")
@@ -235,6 +238,7 @@ def create_schedule(payload: ScheduleRequest):
     return _guard(
         api().create_schedule, payload.campaign_id, payload.contact_ids,
         payload.scheduled_at, payload.cc, payload.bcc,
+        payload.batch_size, payload.interval_minutes,
     )
 
 

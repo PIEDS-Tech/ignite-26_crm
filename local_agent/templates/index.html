@@ -123,6 +123,21 @@
           <input class="input" type="time" id="sched-time">
         </div>
       </div>
+      <div class="row" style="gap:.5rem">
+        <div class="col grow" style="gap:.3rem">
+          <label class="label text-xs" for="sched-batch">Batch size</label>
+          <input class="input" type="number" min="0" id="sched-batch" value="0">
+        </div>
+        <div class="col grow" style="gap:.3rem">
+          <label class="label text-xs" for="sched-interval">Minutes between batches</label>
+          <input class="input" type="number" min="0" id="sched-interval" value="0">
+        </div>
+      </div>
+      <p class="text-xs muted">
+        Leave batch size at 0 to send the whole selection in one go. Set it to
+        drip instead — 20 every 30 minutes reads far less like a blast, and
+        leaves room to stop after the first few if something looks wrong.
+      </p>
       <p class="text-xs muted" id="sched-cc"></p>
       <p class="text-xs s-FAILED" id="sched-error"></p>
     </section>
@@ -491,6 +506,8 @@ async function saveSchedule() {
       scheduled_at: when.toISOString(),
       cc: $('cc').value.trim(),
       bcc: $('bcc').value.trim(),
+      batch_size: parseInt($('sched-batch').value, 10) || 0,
+      interval_minutes: parseInt($('sched-interval').value, 10) || 0,
     });
   } catch (e) {
     $('sched-error').textContent = e.message;
@@ -521,8 +538,9 @@ async function loadSchedules() {
       <div>
         <div class="text-sm">${esc(j.campaign)}</div>
         <div class="text-xs muted">
-          ${new Date(j.scheduled_at).toLocaleString()} ·
+          ${new Date(j.next_run_at || j.scheduled_at).toLocaleString()} ·
           ${j.remaining}/${j.total} to go ·
+          ${j.batch_size ? `${j.batch_size} every ${j.interval_minutes}m · ` : ''}
           <span class="s-${esc(j.status).toUpperCase()}">${esc(j.status)}</span>
           ${j.last_error ? '· ' + esc(j.last_error) : ''}
         </div>

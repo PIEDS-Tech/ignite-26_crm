@@ -340,6 +340,8 @@ def schedules(request):
             scheduled_at=when,
             cc=payload.get("cc", ""),
             bcc=payload.get("bcc", ""),
+            batch_size=payload.get("batch_size", 0),
+            interval_minutes=payload.get("interval_minutes", 0),
         )
     except schedule_svc.NotSchedulable as exc:
         return json_error(str(exc))
@@ -374,7 +376,7 @@ def schedule_claim(request):
         "requeued_stale": swept,
         "marked_missed": missed,
         "claimed": [
-            {**schedule_svc.as_json(j), "contact_ids": j.next_slice()}
+            {**schedule_svc.as_json(j), "contact_ids": j.next_slice(j.batch_size or None)}
             for j in jobs
         ],
     })

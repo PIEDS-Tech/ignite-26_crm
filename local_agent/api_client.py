@@ -110,7 +110,8 @@ class CrmClient:
     def schedules(self, status="open"):
         return self._request("GET", "/schedules", params={"status": status})
 
-    def create_schedule(self, campaign_id, contact_ids, scheduled_at, cc="", bcc=""):
+    def create_schedule(self, campaign_id, contact_ids, scheduled_at, cc="", bcc="",
+                        batch_size=0, interval_minutes=0):
         """`scheduled_at` must be ISO 8601 WITH an offset -- the server stores
         UTC and the UI speaks IST, so a naive string would be a guess."""
         return self._request("POST", "/schedules", json={
@@ -119,6 +120,8 @@ class CrmClient:
             "scheduled_at": scheduled_at,
             "cc": cc,
             "bcc": bcc,
+            "batch_size": batch_size,
+            "interval_minutes": interval_minutes,
         })
 
     def claim_schedules(self, agent_id="", limit=5):
