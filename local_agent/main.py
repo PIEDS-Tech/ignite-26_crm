@@ -5,7 +5,10 @@ HTTPS and sends through that member's own Gmail. It holds no database
 credentials -- only a revocable API token and a Gmail OAuth token.
 """
 
+import asyncio
 import json
+import logging
+import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -19,11 +22,26 @@ from starlette.requests import Request
 from local_agent.api_client import ApiError, CrmClient
 from local_agent.config import settings
 from local_agent.gmail.client import GmailAuthError, GmailClient
+from local_agent.services import schedule_runner
 from local_agent.services import send as send_svc
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
 state: dict = {"api": None, "gmail": None, "profile": None}
+
+#: Held for the length of a batch. The scheduler and a human pressing Send both
+#: pace themselves between mails; interleaving the two would break that pacing
+#: and walk the mailbox into Gmail's rate limit, which throttles it for hours.
+#:
+#: threading, not asyncio: /api/send is a plain `def` streaming response and so
+#: runs in Starlette's threadpool, where an asyncio lock cannot be acquired.
+send_lock = threading.Lock()
+
+#: Set on shutdown so the poller stops between ticks instead of being killed
+#: mid-send.
+stop_polling = asyncio.Event()
 
 
 @asynccontextmanager
@@ -47,9 +65,25 @@ async def lifespan(app: FastAPI):
     state["api"] = api
     state["profile"] = profile
     state["gmail"] = GmailClient(profile["bits_email"])
+
+    # The scheduler. Gmail has no sendAt, so a scheduled mail only goes out
+    # because this loop is awake to send it -- which is why an always-on agent
+    # is the difference between "9am" meaning 9am and meaning "whenever someone
+    # next opens their laptop". See docs/MAIL_SCHEDULING.md.
+    stop_polling.clear()
+    poller = asyncio.create_task(
+        schedule_runner.loop(api_ref, gmail_ref, send_lock, stop_polling)
+    )
+
     try:
         yield
     finally:
+        stop_polling.set()
+        poller.cancel()
+        try:
+            await poller
+        except (asyncio.CancelledError, Exception):   # noqa: BLE001
+            pass
         api.close()
 
 
@@ -64,6 +98,16 @@ def api() -> CrmClient:
 
 
 def gmail() -> GmailClient:
+    return state["gmail"]
+
+
+# Passed to the poller so it reads `state` at tick time rather than capturing a
+# client that a re-authentication could have replaced underneath it.
+def api_ref() -> CrmClient:
+    return state["api"]
+
+
+def gmail_ref() -> GmailClient:
     return state["gmail"]
 
 
@@ -148,6 +192,15 @@ def send(payload: SendRequest):
     _guard(gmail().verify_identity)
 
     def stream():
+        # Held for the whole batch so a scheduled job cannot start sending
+        # through the same mailbox halfway down this list. try/finally rather
+        # than `with` around the yields alone: a browser that navigates away
+        # closes the generator, and the lock must not go with it.
+        acquired = send_lock.acquire(timeout=120)
+        if not acquired:
+            yield json.dumps({"contact_id": "", "email": "", "name": "", "status": "FAILED",
+                              "detail": "a scheduled send is using the mailbox; try again"}) + "\n"
+            return
         try:
             for outcome in send_svc.send_batch(
                 api(), gmail(), payload.campaign_id, payload.contact_ids,
@@ -157,8 +210,46 @@ def send(payload: SendRequest):
         except ApiError as exc:
             yield json.dumps({"contact_id": "", "email": "", "name": "",
                               "status": "FAILED", "detail": str(exc)}) + "\n"
+        finally:
+            send_lock.release()
 
     return StreamingResponse(stream(), media_type="application/x-ndjson")
+
+
+# ------------------------------------------------------------------ schedules
+
+class ScheduleRequest(SendRequest):
+    #: ISO 8601 WITH an offset. The browser builds it from a local date+time,
+    #: so the offset is what stops "09:00" meaning 09:00 UTC on the server.
+    scheduled_at: str
+
+
+@app.get("/api/schedules")
+def list_schedules(status: str = "open"):
+    return _guard(api().schedules, status)
+
+
+@app.post("/api/schedules")
+def create_schedule(payload: ScheduleRequest):
+    """Queue a send. The server validates the time and the addresses."""
+    return _guard(
+        api().create_schedule, payload.campaign_id, payload.contact_ids,
+        payload.scheduled_at, payload.cc, payload.bcc,
+    )
+
+
+@app.post("/api/schedules/{schedule_id}/cancel")
+def cancel_schedule(schedule_id: str):
+    return _guard(api().cancel_schedule, schedule_id)
+
+
+class RescheduleRequest(BaseModel):
+    scheduled_at: str
+
+
+@app.post("/api/schedules/{schedule_id}/reschedule")
+def move_schedule(schedule_id: str, payload: RescheduleRequest):
+    return _guard(api().reschedule, schedule_id, payload.scheduled_at)
 
 
 @app.get("/api/drafts")

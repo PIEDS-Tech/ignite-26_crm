@@ -103,6 +103,45 @@ class CrmClient:
             json={"status": "failed", "error": error[:2000]},
         )
 
+    # ---- scheduled sends -------------------------------------------------
+    # The agent proposes; the server disposes. It validates the time and the
+    # addresses, owns the queue, and hands work back only when it is due.
+
+    def schedules(self, status="open"):
+        return self._request("GET", "/schedules", params={"status": status})
+
+    def create_schedule(self, campaign_id, contact_ids, scheduled_at, cc="", bcc=""):
+        """`scheduled_at` must be ISO 8601 WITH an offset -- the server stores
+        UTC and the UI speaks IST, so a naive string would be a guess."""
+        return self._request("POST", "/schedules", json={
+            "campaign_id": campaign_id,
+            "contact_ids": contact_ids,
+            "scheduled_at": scheduled_at,
+            "cc": cc,
+            "bcc": bcc,
+        })
+
+    def claim_schedules(self, agent_id="", limit=5):
+        """Lease whatever is due for us. Also sweeps stale leases server-side."""
+        return self._request("POST", "/schedules/claim",
+                             json={"agent_id": agent_id, "limit": limit})
+
+    def report_schedule_progress(self, schedule_id, *, attempted, sent, skipped, error=""):
+        return self._request("POST", f"/schedules/{schedule_id}/progress", json={
+            "attempted": attempted, "sent": sent, "skipped": skipped, "error": error[:2000],
+        })
+
+    def report_schedule_failed(self, schedule_id, error):
+        return self._request("POST", f"/schedules/{schedule_id}/progress",
+                             json={"failed": True, "error": str(error)[:2000]})
+
+    def cancel_schedule(self, schedule_id):
+        return self._request("POST", f"/schedules/{schedule_id}/cancel", json={})
+
+    def reschedule(self, schedule_id, scheduled_at):
+        return self._request("POST", f"/schedules/{schedule_id}/reschedule",
+                             json={"scheduled_at": scheduled_at})
+
     # ---- contact editing -----------------------------------------------
     # The server applies the same permission rule as the web CRM: a member may
     # only change contacts assigned to them. We do not check it here as well --
