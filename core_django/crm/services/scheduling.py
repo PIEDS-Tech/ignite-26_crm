@@ -17,6 +17,7 @@ actually waiting six hours.
 
 from datetime import timedelta
 
+from django.conf import settings
 from django.db import transaction
 from django.utils import timezone
 
@@ -104,20 +105,76 @@ def create(*, campaign_id, member, contact_ids, scheduled_at, cc="", bcc="",
 
 # ------------------------------------------------------------------- timing
 
+def _window():
+    return (
+        int(getattr(settings, "SCHEDULE_WINDOW_START", 9)),
+        int(getattr(settings, "SCHEDULE_WINDOW_END", 19)),
+        set(getattr(settings, "SCHEDULE_WINDOW_DAYS", range(7))),
+    )
+
+
+def grace_hours() -> int:
+    return int(getattr(settings, "SCHEDULE_GRACE_HOURS", 6))
+
+
+def in_window(moment) -> bool:
+    """Is `moment` inside the hours we are willing to mail people?
+
+    Evaluated in the project timezone, not UTC: the window means "9am where the
+    recipient reads it", and the stored value is UTC.
+    """
+    start, end, days = _window()
+    if start == end:
+        return True                                  # window disabled
+
+    local = timezone.localtime(moment)
+    if local.weekday() not in days:
+        return False
+    return start <= local.hour < end
+
+
+def next_open_slot(moment):
+    """The first moment from `moment` onwards that we are willing to send.
+
+    Walks forward a day at a time rather than doing calendar arithmetic in one
+    expression: a closed weekend plus a window that starts tomorrow is fiddly
+    enough that the obvious loop is the honest implementation. Bounded at 14
+    days so a misconfigured empty window cannot spin.
+    """
+    start, end, days = _window()
+    if start == end:
+        return moment
+    if in_window(moment):
+        return moment
+
+    local = timezone.localtime(moment)
+    for _ in range(14):
+        if local.weekday() in days and local.hour < start:
+            candidate = local.replace(hour=start, minute=0, second=0, microsecond=0)
+        else:
+            # After the window closed, or a closed day: try the start of the next.
+            nxt = local + timedelta(days=1)
+            candidate = nxt.replace(hour=start, minute=0, second=0, microsecond=0)
+        if candidate.weekday() in days:
+            return candidate.astimezone(moment.tzinfo)
+        local = candidate
+    return moment                                    # window is never open; do not stall
+
+
 def deliver_after(job, now=None):
     """The earliest moment this job is allowed to go out.
 
-    Phase 1: the scheduled time itself. Phase 3 pushes it to the next open slot
-    when the scheduled time lands inside quiet hours, and the grace window is
-    then measured from THIS value rather than from scheduled_at -- otherwise a
-    job deferred overnight would be declared missed for a lateness it was never
-    permitted to avoid.
+    Usually the scheduled time. When that lands outside the sending window it
+    is pushed to the next open slot -- and the grace window is measured from
+    THIS value rather than from scheduled_at, so a job deferred overnight is not
+    declared missed for a lateness it was never permitted to avoid.
     """
-    return job.scheduled_at
+    return next_open_slot(job.scheduled_at)
 
 
-def deadline(job, grace_hours, now=None):
-    return deliver_after(job, now) + timedelta(hours=grace_hours)
+def deadline(job, hours=None, now=None):
+    hours = grace_hours() if hours is None else hours
+    return deliver_after(job, now) + timedelta(hours=hours)
 
 
 def is_runnable(job, now=None) -> tuple[bool, str]:
@@ -131,11 +188,62 @@ def is_runnable(job, now=None) -> tuple[bool, str]:
 
     if job.status in TERMINAL_SCHEDULE_STATUSES:
         return False, f"already {job.status}"
-    if now < deliver_after(job, now):
+
+    allowed_from = deliver_after(job, now)
+    if now < allowed_from:
+        # Distinguish "you scheduled it for later" from "we moved it": the
+        # second is the system overruling the operator, and they should be able
+        # to read that off the schedule page rather than infer it.
+        if allowed_from > job.scheduled_at:
+            start, end, _ = _window()
+            return False, (
+                f"outside the sending window ({start:02d}:00-{end:02d}:00); "
+                f"held until {timezone.localtime(allowed_from):%d %b %H:%M}"
+            )
         return False, "not due yet"
+    if not in_window(now):
+        start, end, _ = _window()
+        return False, f"outside the sending window ({start:02d}:00-{end:02d}:00)"
     if job.campaign.status != CampaignStatus.ACTIVE.value:
         return False, f"campaign is {job.campaign.status}"
     return True, ""
+
+
+def is_missed(job, now=None) -> bool:
+    """Past the point where sending this would do more harm than good."""
+    now = now or timezone.now()
+    if job.status in TERMINAL_SCHEDULE_STATUSES:
+        return False
+    return now > deadline(job, now=now)
+
+
+@transaction.atomic
+def sweep_missed(now=None) -> int:
+    """Mark jobs nothing executed in time.
+
+    Deliberately a state change and not a silent drop: "we did not send this"
+    is information somebody needs, and the CRM's schedule page leads with it.
+    """
+    now = now or timezone.now()
+    stale = (
+        ScheduledSend.objects
+        .exclude(status__in=TERMINAL_SCHEDULE_STATUSES)
+        .exclude(status=ScheduleStatus.RUNNING.value)
+        .select_related("campaign")
+    )
+    marked = 0
+    for job in stale:
+        if not is_missed(job, now):
+            continue
+        job.status = ScheduleStatus.MISSED.value
+        job.finished_at = now
+        job.last_error = (
+            f"nothing executed this within {grace_hours()}h of "
+            f"{timezone.localtime(deliver_after(job, now)):%d %b %H:%M}"
+        )
+        job.save(update_fields=["status", "finished_at", "last_error", "updated_at"])
+        marked += 1
+    return marked
 
 
 # ------------------------------------------------------------------ claiming

@@ -23,6 +23,31 @@ from shared.enums import CampaignStatus, ContactLifecycle, MailingStatus, Schedu
 pytestmark = pytest.mark.django_db
 
 
+@pytest.fixture(autouse=True)
+def _window_off_by_default(settings):
+    """Most tests here are about the queue, not the clock.
+
+    Leaving the real 09:00-19:00 default in place would make them pass or fail
+    depending on what time of day the suite happens to run -- which is exactly
+    the kind of test that erodes trust in a suite. Tests that are ABOUT the
+    window ask for the `window` fixture and get it back.
+    """
+    settings.SCHEDULE_WINDOW_START = 0
+    settings.SCHEDULE_WINDOW_END = 0
+    settings.SCHEDULE_WINDOW_DAYS = [0, 1, 2, 3, 4, 5, 6]
+    settings.SCHEDULE_GRACE_HOURS = 6
+
+
+@pytest.fixture
+def window(settings):
+    """The real defaults: 09:00-19:00 every day, six hours of grace."""
+    settings.SCHEDULE_WINDOW_START = 9
+    settings.SCHEDULE_WINDOW_END = 19
+    settings.SCHEDULE_WINDOW_DAYS = [0, 1, 2, 3, 4, 5, 6]
+    settings.SCHEDULE_GRACE_HOURS = 6
+    return settings
+
+
 @pytest.fixture
 def member():
     return TeamMember.objects.create(
@@ -476,3 +501,85 @@ def test_a_member_may_look_but_not_cancel(client, campaign, member, contact):
     assert r.status_code in (302, 403)
     job.refresh_from_db()
     assert job.status == ScheduleStatus.PENDING.value
+
+
+# ----------------------------------------------- the sending window and grace
+
+def at(hour, minute=0, day=18):
+    """A moment on 18 Aug 2026 in the project timezone (IST)."""
+    from datetime import datetime
+    return timezone.make_aware(datetime(2026, 8, day, hour, minute))
+
+
+def test_the_window_is_evaluated_in_local_time_not_utc(window):
+    """09:00 IST is 03:30 UTC. Judging the hour in UTC would close the window
+    over the entire Indian working morning."""
+    assert svc.in_window(at(9, 30)) is True
+    assert svc.in_window(at(18, 59)) is True
+    assert svc.in_window(at(19, 0)) is False
+    assert svc.in_window(at(3, 0)) is False
+
+
+def test_next_open_slot_moves_a_late_night_job_to_the_morning(window):
+    assert svc.next_open_slot(at(22, 30)) == at(9, 0, day=19)
+    assert svc.next_open_slot(at(6, 0)) == at(9, 0)
+    assert svc.next_open_slot(at(11, 0)) == at(11, 0)     # already open
+
+
+def test_a_closed_weekend_pushes_to_monday(window):
+    window.SCHEDULE_WINDOW_DAYS = [0, 1, 2, 3, 4]
+    saturday = at(11, 0, day=22)
+    assert saturday.weekday() == 5
+    assert svc.next_open_slot(saturday) == at(9, 0, day=24)   # Monday
+
+
+def test_an_equal_start_and_end_disables_the_window():
+    """The autouse fixture already disables it; this pins the behaviour."""
+    assert svc.in_window(at(3, 0)) is True
+    assert svc.next_open_slot(at(3, 0)) == at(3, 0)
+
+
+def test_grace_runs_from_when_the_job_was_first_allowed_to_run(window, campaign, member, contact):
+    """A 22:00 job deferred to 09:00 must not be 'missed' for the hours it was
+    never permitted to use."""
+    job = schedule(campaign, member, [contact], when=at(22, 0))
+
+    assert svc.deliver_after(job) == at(9, 0, day=19)
+    assert svc.deadline(job) == at(15, 0, day=19)
+
+    assert svc.is_missed(job, now=at(8, 0, day=19)) is False    # 10h "late", fine
+    assert svc.is_missed(job, now=at(14, 0, day=19)) is False   # inside grace
+    assert svc.is_missed(job, now=at(16, 0, day=19)) is True    # past it
+
+
+def test_a_job_due_inside_quiet_hours_is_held_not_sent(window, campaign, member, contact):
+    job = schedule(campaign, member, [contact], when=at(22, 0))
+    ok, reason = svc.is_runnable(job, now=at(22, 30))
+    assert ok is False and "window" in reason
+
+
+def test_sweep_missed_marks_and_explains(window, campaign, member, contact):
+    job = schedule(campaign, member, [contact], when=at(9, 30))
+
+    assert svc.sweep_missed(now=at(12, 0)) == 0       # still inside grace
+    assert svc.sweep_missed(now=at(17, 0)) == 1       # past 15:30
+
+    job.refresh_from_db()
+    assert job.status == ScheduleStatus.MISSED.value
+    assert "nothing executed this" in job.last_error
+    assert job.finished_at is not None
+
+
+def test_a_missed_job_is_never_claimed_afterwards(window, campaign, member, contact):
+    schedule(campaign, member, [contact], when=at(9, 30))
+    svc.sweep_missed(now=at(17, 0))
+    assert svc.claim_due(member, now=at(17, 1)) == []
+
+
+def test_a_running_job_is_not_swept_out_from_under_its_agent(campaign, member, contact):
+    """Marking a live batch missed would leave a half-sent job looking abandoned."""
+    job = schedule(campaign, member, [contact], when=due_now())
+    svc.claim_due(member)
+    assert svc.sweep_missed(now=timezone.now() + timedelta(days=2)) == 0
+    job.refresh_from_db()
+    assert job.status == ScheduleStatus.RUNNING.value

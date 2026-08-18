@@ -360,6 +360,10 @@ def schedule_claim(request):
     payload = payload or {}
 
     swept = schedule_svc.sweep_expired_leases()
+    # Retiring jobs nothing ran in time belongs here for the same reason as the
+    # lease sweep: every agent polls this anyway, so the housekeeping runs as
+    # often as the thing it cleans up, with no extra process to keep alive.
+    missed = schedule_svc.sweep_missed()
     jobs = schedule_svc.claim_due(
         request.member,
         agent_id=str(payload.get("agent_id", ""))[:80],
@@ -368,6 +372,7 @@ def schedule_claim(request):
 
     return JsonResponse({
         "requeued_stale": swept,
+        "marked_missed": missed,
         "claimed": [
             {**schedule_svc.as_json(j), "contact_ids": j.next_slice()}
             for j in jobs
