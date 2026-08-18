@@ -145,6 +145,15 @@ class CrmClient:
         return self._request("POST", f"/schedules/{schedule_id}/reschedule",
                              json={"scheduled_at": scheduled_at})
 
+    # ---- follow-ups ------------------------------------------------------
+
+    def reply_scan(self):
+        """Threads the server wants re-read for a reply."""
+        return self._request("GET", "/replies/scan")
+
+    def report_reply(self, mailing_id, replied: bool):
+        return self._request("POST", f"/replies/{mailing_id}", json={"replied": replied})
+
     # ---- contact editing -----------------------------------------------
     # The server applies the same permission rule as the web CRM: a member may
     # only change contacts assigned to them. We do not check it here as well --

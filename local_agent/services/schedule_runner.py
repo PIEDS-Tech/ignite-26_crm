@@ -73,12 +73,46 @@ def run_job(api, gmail, job) -> dict:
     }
 
 
+def scan_replies(api, gmail) -> int:
+    """Ask Gmail who wrote back, and tell the server.
+
+    Runs before claiming work, deliberately: a reply noticed now can pull that
+    contact out of a follow-up that is about to go out this very tick.
+
+    Reports the fact and nothing else. Deciding what a reply MEANS -- whether it
+    cancels a follow-up, whether it moves the contact's lifecycle -- is the
+    server's, because that is shared state and this is one laptop.
+    """
+    checked = 0
+    for row in api.reply_scan():
+        try:
+            replied = gmail.thread_has_reply_from(row["thread_id"], row["email"])
+            api.report_reply(row["mailing_id"], replied)
+            checked += 1
+            if replied:
+                log.info("reply seen from %s (%s)", row["email"], row["campaign"])
+        except ApiError as exc:
+            log.warning("could not report reply scan for %s: %s", row["mailing_id"], exc)
+        except Exception:                                # noqa: BLE001
+            # One unreadable thread must not stop the scan. It stays unchecked
+            # and comes round again next tick.
+            log.exception("reply scan failed for %s", row["mailing_id"])
+    return checked
+
+
 def tick(api, gmail) -> int:
     """One poll. Returns how many jobs were executed.
 
     Every failure mode here is per-job: one broken campaign must not stop the
     others, and must not stop the next tick either.
     """
+    try:
+        scan_replies(api, gmail)
+    except ApiError as exc:
+        # Follow-ups are a nicety; scheduled sends are not. A failing scan must
+        # never stop the queue being drained.
+        log.warning("reply scan skipped: %s", exc)
+
     response = api.claim_schedules(agent_id=agent_id(), limit=CLAIM_LIMIT)
 
     requeued = response.get("requeued_stale") or 0

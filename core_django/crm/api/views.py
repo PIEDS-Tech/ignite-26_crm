@@ -17,6 +17,7 @@ from django.views.decorators.http import require_GET, require_POST
 from crm.models import Campaign, CampaignMailing, Contact, ScheduledSend
 from crm.services import contacts as contact_svc
 from crm.services import mailing as mailing_svc
+from crm.services import followups as followup_svc
 from crm.services import scheduling as schedule_svc
 from shared.enums import TERMINAL_SCHEDULE_STATUSES, CampaignStatus, MailingStatus
 
@@ -366,6 +367,9 @@ def schedule_claim(request):
     # lease sweep: every agent polls this anyway, so the housekeeping runs as
     # often as the thing it cleans up, with no extra process to keep alive.
     missed = schedule_svc.sweep_missed()
+    # Queue any follow-ups that have come due. Same reasoning as the sweeps:
+    # every agent polls this anyway, so there is no separate timer to keep alive.
+    queued = len(followup_svc.run_all_rules())
     jobs = schedule_svc.claim_due(
         request.member,
         agent_id=str(payload.get("agent_id", ""))[:80],
@@ -375,6 +379,7 @@ def schedule_claim(request):
     return JsonResponse({
         "requeued_stale": swept,
         "marked_missed": missed,
+        "follow_ups_queued": queued,
         "claimed": [
             {**schedule_svc.as_json(j), "contact_ids": j.next_slice(j.batch_size or None)}
             for j in jobs
@@ -429,3 +434,50 @@ def schedule_reschedule(request, schedule_id):
     except schedule_svc.NotSchedulable as exc:
         return json_error(str(exc))
     return JsonResponse(schedule_svc.as_json(job))
+
+
+# --------------------------------------------------------------- follow-ups
+# Only the agent can read Gmail, so only the agent can answer "did they reply?".
+# It reports the fact and stops there -- acting on it is the server's job.
+
+@require_GET
+@api_token_required
+def reply_scan(request):
+    """Threads worth re-reading for this member."""
+    return JsonResponse([
+        {
+            "mailing_id": str(m.id),
+            "thread_id": m.mail_thread_id,
+            "email": m.contact.email,
+            "campaign": m.campaign.title,
+            "sent_at": m.sent_at.isoformat() if m.sent_at else None,
+        }
+        for m in followup_svc.threads_to_check(request.member)
+    ], safe=False)
+
+
+@require_POST
+@api_token_required
+def reply_report(request, mailing_id):
+    payload, error = parse_json(request)
+    if error:
+        return error
+
+    result = followup_svc.record_reply_scan(
+        mailing_id, request.member, replied=bool(payload.get("replied"))
+    )
+
+    # A reply that lands after the follow-up was queued but before it went out
+    # is the one window where we would otherwise chase someone who has already
+    # answered. Pull them back out of the queue.
+    if result.get("status") == "replied":
+        try:
+            mailing = CampaignMailing.objects.select_related("campaign").get(id=mailing_id)
+        except (CampaignMailing.DoesNotExist, ValueError, TypeError):
+            return JsonResponse(result)
+        for rule in mailing.campaign.follow_up_rules.filter(is_active=True):
+            result["pulled_from_queue"] = followup_svc.cancel_pending_for(
+                mailing.contact_id, rule.follow_up_id
+            )
+
+    return JsonResponse(result)

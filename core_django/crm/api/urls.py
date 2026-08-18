@@ -25,4 +25,8 @@ urlpatterns = [
          name="schedule_cancel"),
     path("schedules/<uuid:schedule_id>/reschedule", views.schedule_reschedule,
          name="schedule_reschedule"),
+
+    # Follow-ups. The agent reads Gmail and reports; the server decides.
+    path("replies/scan", views.reply_scan, name="reply_scan"),
+    path("replies/<uuid:mailing_id>", views.reply_report, name="reply_report"),
 ]

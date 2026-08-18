@@ -65,10 +65,18 @@ class ScheduleStatus(str, Enum):
 class ContactLifecycle(str, Enum):
     """Where a prospect stands in the outreach funnel.
 
-    NEW -> CONTACTED is the ONLY automatic transition: the server applies it in
-    services/mailing.py::record_result the moment a mail is confirmed sent. The
-    rest are set by hand, deliberately -- inferring "bounced" from an SMTP error
-    string is guesswork we would later have to un-guess.
+    NEW -> CONTACTED is applied automatically by services/mailing.py::record_result
+    the moment a mail is confirmed sent.
+
+    CONTACTED -> REPLIED is the only other automatic transition, and it is
+    OPT-IN per follow-up rule (FollowUpRule.mark_replied, off by default). The
+    distinction that earns it: a reply sitting in the Gmail thread is something
+    we observed, not something we inferred. Everything else is still set by hand
+    on purpose -- reading "bounced" out of an SMTP error string is guesswork we
+    would later have to un-guess.
+
+    Neither automatic transition may move a contact backwards, and neither may
+    override a state a human chose: DO_NOT_CONTACT and BOUNCED always win.
     """
 
     NEW = "new"

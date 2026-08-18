@@ -336,6 +336,13 @@ class CampaignMailing(TimeStampedModel):
     error_detail = models.TextField(blank=True)
     sent_at = models.DateTimeField(null=True, blank=True)
 
+    # Follow-up bookkeeping. `replied_at` is set only when a reply is actually
+    # seen in the Gmail thread; `followed_up_at` stops a rule queueing the same
+    # follow-up twice on successive scans.
+    replied_at = models.DateTimeField(null=True, blank=True)
+    reply_checked_at = models.DateTimeField(null=True, blank=True)
+    followed_up_at = models.DateTimeField(null=True, blank=True)
+
     class Meta:
         db_table = "campaign_mailings"
         ordering = ["-created_at"]
@@ -464,3 +471,59 @@ class ScheduledSend(TimeStampedModel):
         """
         end = self.total if size is None else min(self.total, self.cursor + size)
         return [str(cid) for cid in self.contact_ids[self.cursor:end]]
+
+
+class FollowUpRule(TimeStampedModel):
+    """Send a second campaign to whoever did not reply to the first.
+
+    Reply detection is real evidence, not inference: every sent mailing records
+    its Gmail thread id, and the agent asks Gmail whether that thread gained a
+    message from the contact. Compare ContactLifecycle, where guessing "bounced"
+    from an SMTP string was deliberately refused -- this is the opposite case,
+    an observed fact rather than a reading of tea leaves.
+    """
+
+    campaign = models.ForeignKey(
+        Campaign, on_delete=models.CASCADE, related_name="follow_up_rules",
+        help_text="The campaign whose silence we are following up on.",
+    )
+    follow_up = models.ForeignKey(
+        Campaign, on_delete=models.PROTECT, related_name="follows_from",
+        help_text="What to send them instead.",
+    )
+    delay_days = models.PositiveIntegerField(
+        default=3, help_text="Days of silence before the follow-up is queued."
+    )
+    is_active = models.BooleanField(default=True)
+
+    #: Off by default and per rule, because it moves a contact through the
+    #: funnel automatically. shared/enums.py documents NEW -> CONTACTED as the
+    #: only automatic transition; this is the second, and it is opt-in so that
+    #: rule stays a decision rather than an accident.
+    mark_replied = models.BooleanField(
+        default=False,
+        help_text="Also set the contact's lifecycle to Replied when a reply is seen.",
+    )
+
+    created_by = models.ForeignKey(
+        TeamMember, on_delete=models.SET_NULL, null=True, related_name="+"
+    )
+
+    class Meta:
+        db_table = "follow_up_rules"
+        ordering = ["-created_at"]
+        constraints = [
+            # One rule per pair: two rules chaining the same campaigns would
+            # queue the same follow-up twice.
+            models.UniqueConstraint(
+                fields=["campaign", "follow_up"], name="uniq_followup_pair"
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.campaign_id} -> {self.follow_up_id} after {self.delay_days}d"
+
+    def clean(self):
+        from django.core.exceptions import ValidationError
+        if self.campaign_id and self.campaign_id == self.follow_up_id:
+            raise ValidationError("A campaign cannot follow up on itself.")

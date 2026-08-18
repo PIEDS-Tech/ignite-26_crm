@@ -171,6 +171,44 @@ class GmailClient:
         sent = self.service.users().messages().send(userId="me", body={"raw": raw}).execute()
         return SendResult(message_id=sent["id"], thread_id=sent["threadId"])
 
+    def thread_has_reply_from(self, thread_id: str, address: str) -> bool:
+        """Did `address` write back in this thread?
+
+        Evidence, not inference: we look for a message in the thread whose From
+        is the prospect. That rules out our own follow-ups, anyone we CC'd, and
+        Gmail's own "message blocked" notices, all of which land in the same
+        thread and none of which mean the prospect replied.
+
+        A thread that has vanished (deleted, or the id is stale) reads as "no
+        reply" rather than raising: the caller is a background scan, and one
+        bad row must not stop it looking at the rest.
+        """
+        try:
+            thread = (
+                self.service.users().threads()
+                .get(userId="me", id=thread_id, format="metadata",
+                     metadataHeaders=["From"])
+                .execute()
+            )
+        except Exception:                              # noqa: BLE001
+            return False
+
+        wanted = (address or "").strip().lower()
+        if not wanted:
+            return False
+
+        for message in thread.get("messages", []):
+            headers = message.get("payload", {}).get("headers", [])
+            sender = next(
+                (h.get("value", "") for h in headers if h.get("name", "").lower() == "from"),
+                "",
+            )
+            # The header is "Name <addr>", so a substring test on the bare
+            # address is the reliable read.
+            if wanted in sender.lower():
+                return True
+        return False
+
     def find_message_to(self, address: str, subject: str) -> SendResult | None:
         """Used by /reconcile to resolve a stranded DRAFT row.
 
