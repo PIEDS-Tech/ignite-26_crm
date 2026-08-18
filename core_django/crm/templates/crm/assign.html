@@ -34,7 +34,7 @@
               {% if c.assigned_to %}<span class="badge badge-secondary">{{ c.assigned_to.name }}</span>
               {% else %}<span class="muted">—</span>{% endif %}
             </td>
-            <td class="text-sm muted center">{{ c.mailings.count|default:"" }}</td>
+            <td class="text-sm muted center">{{ c.mailed|default:"" }}</td>
           </tr>
         {% empty %}
           <tr><td colspan="6" class="empty">No contacts match these filters.</td></tr>

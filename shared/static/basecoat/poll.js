@@ -68,15 +68,37 @@
     return tick;
   }
 
+  /* Values of the checked row boxes. A "select all" header box carries no
+     value of its own (the browser defaults it to "on"), so it is ignored --
+     otherwise leaving it ticked with no rows selected would block refreshes
+     for as long as the tab stayed open. */
+  function checkedValues() {
+    return Array.from(
+      document.querySelectorAll('[data-poll] input[type=checkbox]:checked')
+    ).map(c => c.value).filter(v => v && v !== 'on');
+  }
+
   /* Re-fetch this same URL and swap the [data-poll] regions.
    *
    * Checkbox state is preserved across the swap: losing a 40-contact selection
-   * to a background refresh would make the feature worse than not having it. */
+   * to a background refresh would make the feature worse than not having it.
+   *
+   * Two separate things protect it, because one was not enough:
+   *
+   *   1. A refresh is SKIPPED outright while anything is selected. Someone
+   *      part-way through picking 40 contacts does not want the table moving
+   *      under them, and other people's edits can wait until they submit.
+   *   2. If a refresh does land, the checked set is re-read immediately before
+   *      the swap as well as before the fetch, and the two are merged.
+   *
+   * (2) is the one that actually bit: the snapshot used to be taken before a
+   * fetch that could run for ten seconds on a slow page, so every box ticked
+   * while it was in flight was silently rolled back on arrival. It looked
+   * exactly like a cap on how many contacts you were allowed to select. */
   async function refreshPage() {
-    const checked = new Set(
-      Array.from(document.querySelectorAll('[data-poll] input[type=checkbox]:checked'))
-           .map(c => c.value)
-    );
+    if (checkedValues().length) return;
+
+    const checked = new Set(checkedValues());
 
     const html = await fetch(location.href, {
       headers: { 'X-Requested-With': 'poll' },
@@ -90,6 +112,10 @@
     const fresh = doc.querySelectorAll('[data-poll]');
     const here = document.querySelectorAll('[data-poll]');
     if (fresh.length !== here.length) return;   // page shape changed; leave it alone
+
+    // Anything ticked while the fetch was in flight was ticked on the DOM we
+    // are about to destroy. Collect it before the swap, not after.
+    checkedValues().forEach(v => checked.add(v));
 
     here.forEach((el, i) => { el.innerHTML = fresh[i].innerHTML; });
 

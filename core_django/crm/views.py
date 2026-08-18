@@ -287,6 +287,11 @@ def contact_bulk_edit(request):
 @lead_required
 def assign(request):
     qs, ctx = _filter_context(request)
+    # annotate, NOT `{{ c.mailings.count }}` in the template: that was one extra
+    # query per row -- 100 round trips to a hosted database, ~11s per render.
+    # A page that slow is not just unpleasant, it broke selection outright (the
+    # background refresh landed mid-click and rolled the ticks back).
+    qs = qs.annotate(mailed=Count("mailings", distinct=True))
     page = Paginator(qs, 100).get_page(request.GET.get("page"))
     return render(request, "crm/assign.html", _base(request, page=page, total=qs.count(), **ctx))
 
