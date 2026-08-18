@@ -10,12 +10,15 @@ from dataclasses import asdict
 from django.core.exceptions import PermissionDenied
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.http import JsonResponse
+from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from django.views.decorators.http import require_GET, require_POST
 
-from crm.models import Campaign, CampaignMailing, Contact
+from crm.models import Campaign, CampaignMailing, Contact, ScheduledSend
 from crm.services import contacts as contact_svc
 from crm.services import mailing as mailing_svc
-from shared.enums import CampaignStatus, MailingStatus
+from crm.services import scheduling as schedule_svc
+from shared.enums import TERMINAL_SCHEDULE_STATUSES, CampaignStatus, MailingStatus
 
 from .auth import api_token_required, json_error, parse_json
 
@@ -286,3 +289,136 @@ def drafts(request):
         }
         for m in mailing_svc.stranded_drafts(request.member)
     ], safe=False)
+
+
+# ----------------------------------------------------------- scheduled sends
+# The agent cannot schedule anything by itself: it posts an intent, the server
+# validates it, stores it, and later hands it back when it is due. Same division
+# as the claim protocol -- the laptop supplies Gmail, the server supplies truth.
+
+def _parse_when(raw):
+    """ISO 8601 with an offset -> aware datetime, or None."""
+    if not raw:
+        return None
+    when = parse_datetime(raw)
+    if when is None:
+        return None
+    return timezone.make_aware(when) if timezone.is_naive(when) else when
+
+
+@api_token_required
+def schedules(request):
+    """GET the caller's jobs, POST a new one."""
+    if request.method == "GET":
+        qs = (
+            ScheduledSend.objects.filter(member=request.member)
+            .select_related("campaign", "member")
+        )
+        status = request.GET.get("status")
+        if status == "open":
+            qs = qs.exclude(status__in=TERMINAL_SCHEDULE_STATUSES)
+        elif status:
+            qs = qs.filter(status=status)
+        return JsonResponse([schedule_svc.as_json(j) for j in qs[:200]], safe=False)
+
+    if request.method != "POST":
+        return json_error("GET or POST only.", status=405)
+
+    payload, error = parse_json(request)
+    if error:
+        return error
+
+    when = _parse_when(payload.get("scheduled_at"))
+    if when is None:
+        return json_error("scheduled_at must be an ISO 8601 datetime with an offset.")
+
+    try:
+        job = schedule_svc.create(
+            campaign_id=payload.get("campaign_id"),
+            member=request.member,
+            contact_ids=payload.get("contact_ids") or [],
+            scheduled_at=when,
+            cc=payload.get("cc", ""),
+            bcc=payload.get("bcc", ""),
+        )
+    except schedule_svc.NotSchedulable as exc:
+        return json_error(str(exc))
+
+    return JsonResponse(schedule_svc.as_json(job), status=201)
+
+
+@require_POST
+@api_token_required
+def schedule_claim(request):
+    """Lease everything due for this agent's member.
+
+    Sweeping expired leases here rather than on a separate timer: every agent
+    polls this endpoint anyway, so the recovery path runs as often as the thing
+    it recovers from, with no extra process to keep alive.
+    """
+    payload, _ = parse_json(request)
+    payload = payload or {}
+
+    swept = schedule_svc.sweep_expired_leases()
+    jobs = schedule_svc.claim_due(
+        request.member,
+        agent_id=str(payload.get("agent_id", ""))[:80],
+        limit=int(payload.get("limit", 5) or 5),
+    )
+
+    return JsonResponse({
+        "requeued_stale": swept,
+        "claimed": [
+            {**schedule_svc.as_json(j), "contact_ids": j.next_slice()}
+            for j in jobs
+        ],
+    })
+
+
+@require_POST
+@api_token_required
+def schedule_progress(request, schedule_id):
+    payload, error = parse_json(request)
+    if error:
+        return error
+
+    if payload.get("failed"):
+        schedule_svc.mark_failed(schedule_id, request.member, payload.get("error", ""))
+        return JsonResponse({"status": "failed"})
+
+    return JsonResponse(schedule_svc.record_progress(
+        schedule_id,
+        request.member,
+        attempted=payload.get("attempted", 0),
+        sent=payload.get("sent", 0),
+        skipped=payload.get("skipped", 0),
+        error=payload.get("error", ""),
+    ))
+
+
+@require_POST
+@api_token_required
+def schedule_cancel(request, schedule_id):
+    try:
+        job = schedule_svc.cancel(schedule_id, member=request.member)
+    except schedule_svc.NotSchedulable as exc:
+        return json_error(str(exc))
+    return JsonResponse(schedule_svc.as_json(job))
+
+
+@require_POST
+@api_token_required
+def schedule_reschedule(request, schedule_id):
+    payload, error = parse_json(request)
+    if error:
+        return error
+
+    when = _parse_when(payload.get("scheduled_at"))
+    if when is None:
+        return json_error("scheduled_at must be an ISO 8601 datetime with an offset.")
+
+    try:
+        job = schedule_svc.reschedule(schedule_id, when, member=request.member)
+    except schedule_svc.NotSchedulable as exc:
+        return json_error(str(exc))
+    return JsonResponse(schedule_svc.as_json(job))

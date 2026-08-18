@@ -18,9 +18,11 @@ from django.utils import timezone
 
 from shared.enums import (
     BLOCKED_LIFECYCLES,
+    TERMINAL_SCHEDULE_STATUSES,
     CampaignStatus,
     ContactLifecycle,
     MailingStatus,
+    ScheduleStatus,
 )
 
 from .validators import batch_validator, phone_validator, validate_bits_email
@@ -352,3 +354,99 @@ class CampaignMailing(TimeStampedModel):
 
     def __str__(self):
         return f"{self.campaign_id} -> {self.contact_id} [{self.status}]"
+
+
+class ScheduledSend(TimeStampedModel):
+    """A campaign send lined up for later.
+
+    Gmail has no server-side scheduling -- there is no `sendAt` on the API -- so
+    this row is not a promise to Google, it is a note to ourselves that some
+    agent must pick up at the right moment. See docs/MAIL_SCHEDULING.md.
+
+    It stores WHEN and FOR WHOM. It stores nothing about how a mail is built:
+    that stays in services/render.py and is resolved at execution time against
+    whatever the campaign and the contact say then, not what they said when the
+    job was created. Scheduling a send is not a way to freeze a template.
+    """
+
+    campaign = models.ForeignKey(Campaign, on_delete=models.PROTECT, related_name="schedules")
+
+    # Whose Gmail sends this, and therefore the only agent permitted to execute
+    # it. An agent authenticates as exactly one member; letting it run someone
+    # else's job would send from the wrong mailbox and record a false sent_by.
+    member = models.ForeignKey(TeamMember, on_delete=models.PROTECT, related_name="schedules")
+    created_by = models.ForeignKey(
+        TeamMember, on_delete=models.SET_NULL, null=True, related_name="+"
+    )
+
+    #: Snapshot of the selection. Deliberately ids and not a M2M: this is a
+    #: record of intent at scheduling time, and claim_batch re-checks every one
+    #: of them under a lock anyway (assignment, archived, lifecycle, cap).
+    contact_ids = ArrayField(models.UUIDField(), default=list)
+
+    #: Index of the next contact to attempt. Progress is a cursor rather than
+    #: "contacts that still lack a mailing" because a permanently skipped
+    #: contact -- unassigned, archived, do_not_contact -- never gets a mailing
+    #: row at all, and that query would leave the job running forever.
+    cursor = models.PositiveIntegerField(default=0)
+
+    scheduled_at = models.DateTimeField(db_index=True)
+    status = models.CharField(
+        max_length=12,
+        choices=ScheduleStatus.choices(),
+        default=ScheduleStatus.PENDING.value,
+        db_index=True,
+    )
+
+    # Same envelope the manual send path uses; validated by
+    # services/mailing.py::parse_copy_addresses before it ever lands here.
+    cc = models.CharField(max_length=500, blank=True)
+    bcc = models.CharField(max_length=500, blank=True)
+
+    # The lease. An expired lease on a RUNNING job means its executor died
+    # mid-batch; a sweep returns it to PENDING. This is a scheduling
+    # convenience, NOT the safety mechanism -- uniq_campaign_contact is what
+    # actually makes a double execution harmless.
+    leased_by = models.CharField(max_length=80, blank=True)
+    lease_expires_at = models.DateTimeField(null=True, blank=True)
+
+    sent_count = models.PositiveIntegerField(default=0)
+    skipped_count = models.PositiveIntegerField(default=0)
+    attempts = models.PositiveIntegerField(default=0)
+
+    last_error = models.TextField(blank=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "scheduled_sends"
+        ordering = ["scheduled_at"]
+        indexes = [
+            # The due query, run every 60s by every agent.
+            models.Index(fields=["status", "scheduled_at"]),
+            models.Index(fields=["member", "status"]),
+        ]
+
+    def __str__(self):
+        return f"{self.campaign_id} x{len(self.contact_ids)} @ {self.scheduled_at:%Y-%m-%d %H:%M} [{self.status}]"
+
+    @property
+    def total(self) -> int:
+        return len(self.contact_ids)
+
+    @property
+    def remaining(self) -> int:
+        return max(0, self.total - self.cursor)
+
+    @property
+    def is_terminal(self) -> bool:
+        return self.status in TERMINAL_SCHEDULE_STATUSES
+
+    def next_slice(self, size=None) -> list:
+        """The contacts to attempt on this tick.
+
+        `size=None` means the whole remainder, which is what a one-off send
+        wants. Phase 4 passes a batch size to drip instead.
+        """
+        end = self.total if size is None else min(self.total, self.cursor + size)
+        return [str(cid) for cid in self.contact_ids[self.cursor:end]]

@@ -14,4 +14,15 @@ urlpatterns = [
     path("mailings/claim", views.claim, name="claim"),
     path("mailings/drafts", views.drafts, name="drafts"),
     path("mailings/<uuid:mailing_id>/result", views.report_result, name="result"),
+
+    # Scheduled sends. `claim` leases what is due for the calling agent's
+    # member; see docs/MAIL_SCHEDULING.md for the lease protocol.
+    path("schedules", views.schedules, name="schedules"),
+    path("schedules/claim", views.schedule_claim, name="schedule_claim"),
+    path("schedules/<uuid:schedule_id>/progress", views.schedule_progress,
+         name="schedule_progress"),
+    path("schedules/<uuid:schedule_id>/cancel", views.schedule_cancel,
+         name="schedule_cancel"),
+    path("schedules/<uuid:schedule_id>/reschedule", views.schedule_reschedule,
+         name="schedule_reschedule"),
 ]
