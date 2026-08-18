@@ -173,13 +173,13 @@ All of this lives in `services/scheduling.py` and takes `now` as a parameter (de
 
 ---
 
-## Phase 0 — branch and vocabulary
+## ✅ Phase 0 — branch and vocabulary
 
 - [x] `git switch -c mail_schedule`
 - [x] `ScheduleStatus` + `TERMINAL_SCHEDULE_STATUSES` in `shared/enums.py`
 - [x] This document
 
-## Phase 1 — one-off scheduled sends
+## ✅ Phase 1 — one-off scheduled sends
 
 The MVP: pick contacts, press **Schedule…**, choose a time, and the always-on agent sends it then.
 
@@ -219,21 +219,21 @@ scheduled batch and a manual one from interleaving mid-Gmail-call.
 invisible to a second claimer, an expired lease is swept back, cancel beats execution, member A's
 job is never handed to member B, and the cursor terminates past permanently-skipped contacts.
 
-## Phase 2 — cancel, reschedule, visibility
+## ✅ Phase 2 — cancel, reschedule, visibility
 
 Agent: a **Scheduled** panel with cancel and change-time. CRM: `/schedules/` showing every member's
 jobs with `missed`/`failed` surfaced loudly — a job that silently never ran on someone's laptop is
 precisely the failure the shared CRM exists to make visible. Cancelling a `RUNNING` job stops it
 before the *next* contact; mail already sent stays sent and its rows stand.
 
-## Phase 3 — quiet hours and the grace window
+## ✅ Phase 3 — quiet hours and the grace window
 
 Implements §5. Settings: `SCHEDULE_QUIET_START` / `SCHEDULE_QUIET_END` (default 09:00–19:00 IST),
 `SCHEDULE_QUIET_DAYS`, `SCHEDULE_GRACE_HOURS` (default 6). A campaign paused between scheduling and
 execution becomes `HELD`, then `MISSED` at the deadline: pausing is the documented emergency brake
 (README §5) and must stop a scheduled send visibly, not by silent deletion.
 
-## Phase 4 — drip and throttle
+## ✅ Phase 4 — drip and throttle
 
 Per job: `batch_size`, `interval_minutes`, optional `per_day`, optional jitter so gaps are not
 machine-regular. Each tick takes `contact_ids[cursor : cursor + batch_size]` and advances.
@@ -243,7 +243,7 @@ server-side across every device a member uses, and `AGENT_SEND_DELAY_SECONDS` fo
 pacing. A drip that hits the cap parks until the 24-hour window rolls, exactly as `claim_batch`
 already reports `CAP_REACHED`.
 
-## Phase 5 — follow-up sequences
+## ✅ Phase 5 — follow-up sequences
 
 `FollowUpRule`: parent campaign → follow-up campaign, `delay_days`, condition `no_reply`.
 
@@ -259,19 +259,105 @@ a thread is evidence rather than a guess — but the rule was chosen on purpose,
 auto-`REPLIED` transition is **opt-in per rule**, and that docstring and README §6 are updated in
 the same commit that introduces it.
 
-## Phase 6 — ops and docs
+## ✅ Phase 6 — ops and docs
 
-Finish the runbook below; update README (§5 data model, §10 API, §11 services, change log, known
-gaps) and `.env.example`.
+Runbook below; README updated (§5 data model, §10 API, §11 services, change log, known gaps);
+`.env.example` carries the window, grace and poll settings.
+
+Settings reference:
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `SCHEDULE_WINDOW_START` / `_END` | `9` / `19` | Delivery window, in `TIME_ZONE`. Equal values disable it. |
+| `SCHEDULE_WINDOW_DAYS` | `0,1,2,3,4,5,6` | Weekdays mail may go out; Monday is 0. |
+| `SCHEDULE_GRACE_HOURS` | `6` | How late a job may still send before it is `missed`. |
+| `AGENT_SCHEDULE_POLL_SECONDS` | `60` | How often an agent asks for due work. |
+| `AGENT_SCHEDULE_CLAIM_LIMIT` | `5` | Jobs leased per tick. |
+| `AGENT_ID` | hostname:pid | Who holds a lease, for humans reading the CRM. |
 
 ---
 
 ## 13. Runbook
 
-*(completed in Phase 6 — placeholder headings so the shape is agreed early)*
+### Starting the always-on agent
 
-- Starting the always-on agent, and confirming it is polling
-- Running one agent per member
-- What `missed` means, and how to replay a missed job
-- Draining the queue before a deploy
-- Restarting after a code change (the agent does **not** hot-reload)
+```bash
+# once: issue that member a token and grant Gmail consent on this host
+docker compose exec crm python core_django/manage.py issue_token \
+    kabir@pilani.bits-pilani.ac.in --label always-on
+
+# then, with AGENT_API_TOKEN and AGENT_MEMBER_EMAIL in .env
+docker compose --profile agent up -d
+docker compose logs -f agent
+```
+
+Within a minute the log says:
+
+```
+scheduler polling every 60s as <hostname>:<pid>
+```
+
+If it does not, nothing is scheduled — that line is the whole feature working.
+`GET /health` on port 8111 answers even when the poller is wedged, so check the log, not the port.
+
+### One agent per member
+
+An agent may only execute schedules for the member its token belongs to (§2). To cover several
+people, run one container each — same image, different token and token directory:
+
+```yaml
+  agent-kabir:
+    extends: { service: agent }
+    container_name: ignite_agent_kabir
+    environment:
+      AGENT_API_TOKEN: ${KABIR_AGENT_TOKEN}
+      AGENT_MEMBER_EMAIL: kabir@pilani.bits-pilani.ac.in
+    volumes: [ "~/.ignite_crm/kabir:/tokens" ]
+    ports: [ "8112:8111" ]
+```
+
+Each needs its own Gmail consent granted once on that host, and its own port.
+
+### What `missed` means
+
+Nothing was awake to run the job before its grace window closed (§5). The mail **did not go out**.
+The `/schedules/` page lists these above the table for exactly this reason.
+
+To send it after all: open the job, confirm the campaign is still `active` and the content still
+makes sense, then queue a fresh schedule for the same contacts. A `missed` job is terminal on
+purpose — silently reviving one hours later is how a prospect gets a mail about an event that has
+already happened.
+
+### Draining the queue before a deploy
+
+```bash
+# what is still outstanding
+docker compose exec crm python core_django/manage.py shell -c \
+  "from crm.models import ScheduledSend; from shared.enums import TERMINAL_SCHEDULE_STATUSES; \
+   print(ScheduledSend.objects.exclude(status__in=TERMINAL_SCHEDULE_STATUSES).count())"
+```
+
+A restart mid-batch is safe: the lease expires, the job returns to `PENDING`, and the unique
+constraint means the contacts already done are skipped. The only cost is up to five minutes of
+delay. There is no need to drain anything — but knowing the number tells you what to expect in the
+logs afterwards.
+
+### After a code change
+
+**The agent does not hot-reload.** `docker compose up -d --build agent`, or restart the host
+process. A change to `local_agent/` with no restart looks exactly like a broken feature, and has
+already once been mistaken for one.
+
+### When a scheduled send did not arrive
+
+In order of likelihood:
+
+1. **No agent was running** for that member → the job is `missed` or still `pending`. The log is
+   the proof; `/schedules/` is the summary.
+2. **Outside the sending window** → status is `held`, and `last_error` names the window and the
+   time it will be released.
+3. **Campaign was paused** → `held`, then `missed` at the deadline. Pausing is the emergency brake
+   and it is doing its job.
+4. **Daily cap spent** → the scheduler stands down entirely until the 24-hour window rolls.
+5. **The contact was skipped** → `skipped_count` moved, not `sent_count`. Reasons are the ordinary
+   ones: reassigned, archived, `do_not_contact`, already mailed for that campaign.
