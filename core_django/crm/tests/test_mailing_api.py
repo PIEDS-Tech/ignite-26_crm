@@ -131,6 +131,7 @@ class TestClaim:
         assert len(first["claimed"]) == 1
         assert second["claimed"] == []
         assert "already has a mailing" in second["skipped"][0]["reason"]
+        assert second["skipped"][0]["code"] == mailing_svc.ALREADY_MAILED
         assert CampaignMailing.objects.filter(contact=contact).count() == 1
 
     def test_contact_assigned_to_someone_else_is_refused(
@@ -243,9 +244,12 @@ class TestDraftsAndRetry:
         claim(client, auth, campaign, [contact.id])
 
         body = client.get(reverse("api:drafts"), **auth).json()
-        assert len(body) == 1
-        assert body[0]["to"] == contact.email
-        assert body[0]["subject"] == "Zerodha x PIEDS"
+        # Paged: an interrupted 400-contact batch leaves 400 of these, so the
+        # endpoint reports the total and hands back a page without the bodies.
+        assert body["total"] == 1
+        assert len(body["drafts"]) == 1
+        assert body["drafts"][0]["to"] == contact.email
+        assert body["drafts"][0]["subject"] == "Zerodha x PIEDS"
 
     def test_retry_reuses_the_row_rather_than_inserting(
         self, client, auth, campaign, contact, member

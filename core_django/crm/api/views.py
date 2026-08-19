@@ -274,22 +274,27 @@ def report_result(request, mailing_id):
 @api_token_required
 def drafts(request):
     """DRAFTs stranded by an agent that died between claim and report."""
-    return JsonResponse([
-        {
-            "mailing_id": str(m.id),
-            "campaign": m.campaign.title,
-            "to": m.contact.email,
-            "name": m.contact.full_name,
-            "subject": m.rendered_subject,
-            "body": m.rendered_body,
-            "body_html": m.rendered_body_html,
-            "from_name": m.from_name,
-            "cc": m.cc,
-            "bcc": m.bcc,
-            "created_at": m.created_at.isoformat(),
-        }
-        for m in mailing_svc.stranded_drafts(request.member)
-    ], safe=False)
+    # Paged, and without the bodies. An interrupted 400-contact batch leaves 400
+    # of these, and reconcile only needs the address and subject to ask Gmail
+    # "did this go out?" -- shipping 400 rendered mails to answer that was
+    # megabytes of response on the connection that had just proved unreliable.
+    limit = min(int(request.GET.get("limit", 100) or 100), 500)
+    qs = mailing_svc.stranded_drafts(request.member)
+
+    return JsonResponse({
+        "total": qs.count(),
+        "drafts": [
+            {
+                "mailing_id": str(m.id),
+                "campaign": m.campaign.title,
+                "to": m.contact.email,
+                "name": m.contact.full_name,
+                "subject": m.rendered_subject,
+                "created_at": m.created_at.isoformat(),
+            }
+            for m in qs[:limit]
+        ],
+    })
 
 
 # ----------------------------------------------------------- scheduled sends

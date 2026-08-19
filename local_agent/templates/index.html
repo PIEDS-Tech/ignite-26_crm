@@ -431,13 +431,32 @@ async function send() {
 }
 
 async function reconcile() {
+  // A stranded batch can be hundreds of rows and each one is a Gmail lookup,
+  // so this is slow by nature. Say so, and never dump 400 lines into alert().
+  const btn = event && event.target;
+  if (btn) { btn.disabled = true; btn.textContent = 'Resolving…'; }
+
   try {
     const out = await post('/api/reconcile');
-    alert(out.length
-      ? out.map(o => `${o.email}: ${o.status} — ${o.detail}`).join('\n')
-      : 'No stranded drafts.');
+    if (!out.length) {
+      alert('No stranded drafts. Nothing to resolve.');
+      return;
+    }
+
+    const sent = out.filter(o => o.status === 'SENT').length;
+    const failed = out.length - sent;
+    alert(
+      `Resolved ${out.length} stranded draft(s).\n\n` +
+      `${sent} had actually gone out and are now recorded as sent.\n` +
+      `${failed} never reached anyone and are marked failed — ` +
+      `select those contacts and send again to retry them.`
+    );
     await loadContacts();
-  } catch (e) { alert(e.message); }
+  } catch (e) {
+    alert(e.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Resolve stranded drafts'; }
+  }
 }
 
 $('selectAll').addEventListener('change', e => {

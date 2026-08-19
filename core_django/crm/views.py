@@ -3,6 +3,8 @@ from django.core.exceptions import PermissionDenied, ValidationError
 from django.core.paginator import Paginator
 from django.db.models import Count, Q
 from django.shortcuts import get_object_or_404, redirect, render
+from datetime import timedelta
+
 from django.utils import timezone
 from django.views.decorators.http import require_POST
 
@@ -33,6 +35,11 @@ from .services.render import render as render_mail   # not django.shortcuts.rend
 #: Preview payloads are held in the session between the upload and confirm
 #: steps. Small enough for a session cookie backend and avoids a temp table.
 IMPORT_SESSION_KEY = "pending_import"
+
+#: After this long, a DRAFT mailing is stuck rather than sending. A batch paces
+#: itself at a couple of seconds per mail, so anything older than this was
+#: abandoned by an agent that stopped.
+STRANDED_AFTER_MINUTES = 15
 
 
 def _base(request, **extra):
@@ -408,6 +415,17 @@ def campaign_detail(request, pk):
                        MailingStatus.FAILED.value)
     }
 
+    # A DRAFT more than a few minutes old is not "in flight" -- nothing is going
+    # to happen to it on its own, and until it is resolved that contact cannot
+    # be mailed for this campaign at all. Showing it as activity is how an
+    # interrupted batch reads as a working one.
+    stranded = mailings.filter(
+        status=MailingStatus.DRAFT.value,
+        created_at__lt=timezone.now() - timedelta(minutes=STRANDED_AFTER_MINUTES),
+    ).count()
+    counts["stranded"] = stranded
+    counts["in_flight"] = counts[MailingStatus.DRAFT.value] - stranded
+
     # Render against a real assigned contact so the preview shows what a
     # recipient actually receives, not the raw template.
     sample = Contact.objects.filter(assigned_to__isnull=False).first()
@@ -423,6 +441,11 @@ def campaign_detail(request, pk):
         mailings=Paginator(mailings, 100).get_page(request.GET.get("page")),
         assigned_pool=Contact.objects.filter(assigned_to__isnull=False).count(),
         preview=preview, preview_error=preview_error, sample=sample,
+        stranded_members=(
+            mailings.filter(status=MailingStatus.DRAFT.value)
+            .values_list("sent_by__name", flat=True).distinct()
+            if stranded else []
+        ),
         transitions=campaign_svc.ALLOWED_TRANSITIONS[CampaignStatus(campaign.status)],
     ))
 
