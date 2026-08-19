@@ -255,6 +255,34 @@ view cannot mutate a contact without leaving a trace.
 **Only `active` campaigns can be mailed.** Flipping one to `paused` in the CRM
 stops every agent on every laptop mid-batch. That is the emergency brake.
 
+### `scheduled_sends` — mail queued for later
+
+| Field | Type | Notes |
+|---|---|---|
+| `campaign` / `member` | FK `PROTECT` | `member` is whose Gmail sends it — **and the only agent allowed to run it** |
+| `contact_ids` | UUID array | snapshot of the selection |
+| `cursor` | int | index of the next contact to attempt |
+| `scheduled_at` | DateTime | indexed; the due query runs every 60s |
+| `status` | Char(12) | `pending` / `running` / `held` / `done` / `cancelled` / `missed` / `failed` |
+| `cc` / `bcc` | Char | validated by the same `parse_copy_addresses` as a manual send |
+| `batch_size` / `interval_minutes` / `next_run_at` | | drip; 0 sends the lot at once |
+| `leased_by` / `lease_expires_at` | | crash recovery |
+| `sent_count` / `skipped_count` / `attempts` / `last_error` | | progress |
+
+Progress is a **cursor**, not "contacts that still lack a mailing": a permanently skipped contact
+never gets a mailing row, so that query would leave a job running forever.
+
+### `follow_up_rules` — chasing silence
+
+| Field | Type | Notes |
+|---|---|---|
+| `campaign` → `follow_up` | FK | unique together; a campaign cannot follow up on itself |
+| `delay_days` | int | days of silence before the follow-up is queued |
+| `mark_replied` | Bool | **opt-in**: also move the contact to `replied` when a reply is seen |
+| `is_active` | Bool | |
+
+`campaign_mailings` gains `replied_at`, `reply_checked_at` and `followed_up_at` to support this.
+
 ### `campaign_mailings` — the unit of idempotency
 | Field | Type | Notes |
 |---|---|---|
@@ -338,6 +366,32 @@ address, caps the list at `MAX_COPY_ADDRESSES` (10), stores them on each
 `campaign_mailings` row, and hands them back. A malformed address fails the whole
 request before a single row is written. Preflight echoes back the addresses the
 server accepted, and the send confirmation names them again.
+
+### 5.3 Scheduled sending
+
+Full detail in **`docs/MAIL_SCHEDULING.md`**. The short version, because one
+constraint shapes everything:
+
+**The Gmail API has no `sendAt`.** Gmail's "Schedule send" is a feature of the
+web client, not the API. There is no way to hand Google a future time and walk
+away, so a scheduled mail requires a process that is *awake at that moment
+holding that member's Gmail token*. The CRM cannot be that process — it holds no
+Gmail credentials, deliberately (§2).
+
+So the server owns the queue and every rule, and an agent asks "anything due for
+me?" every 60 seconds. Run the `agent` compose profile on an always-on host and
+09:00 means 09:00; rely on a laptop and it means "whenever that laptop is next
+open", bounded by the grace window.
+
+An agent authenticates as exactly one member and may only run *that* member's
+jobs — anything else would send from the wrong mailbox and record a false
+`sent_by`. One always-on agent therefore covers one account; run one container
+per member to cover more.
+
+Everything else is built on that: a **sending window** so nothing arrives at 3am,
+a **grace period** after which a job is `missed` rather than stale, **drip** to
+spread a batch, and **follow-ups** that chase silence using the Gmail thread the
+original mail created.
 
 ---
 
@@ -442,6 +496,22 @@ the page loading and Send being pressed.
 
 ### Stranded drafts
 
+A `draft` is **not a mail in flight**. It means an agent reserved that contact
+and the server never heard back. Nothing will happen to it on its own, and until
+it is resolved that contact **cannot be mailed for that campaign again** — the
+unique constraint that prevents double-sending also prevents re-sending.
+
+Resolve them from the member's own agent with **Resolve stranded drafts**, which
+asks Gmail which ones actually went out. Anything that did is recorded as sent;
+anything that did not becomes `failed`, and a failed mailing **can** be claimed
+again — so re-selecting those contacts and pressing Send simply works.
+
+`manage.py stranded_drafts` reports the backlog and names who has to clear it.
+Only that member's agent can: the mail left their mailbox, and only they hold the
+Gmail credentials to check it.
+
+#### The original design
+
 If the agent dies between steps 2 and 4, DRAFTs are left behind.
 `GET /mailings/drafts` lists your own; **Resolve stranded drafts** uses
 `GmailClient.find_message_to()` to ask **Gmail itself** whether that mail went
@@ -520,6 +590,7 @@ replaces the rows and would otherwise take the listeners with them.
 | `/campaigns/` | List with sent/failed counts | any member |
 | `/campaigns/<id>/` | Funnel, live preview, status transitions | any member |
 | `/campaigns/new/` · `/campaigns/<id>/edit/` | Template editor: placeholder validation, **Insert link**, HTML toggle | **lead** |
+| `/schedules/` | Every scheduled send; `missed`/`failed` called out, lead-only cancel | member |
 | `/members/` | Team load, **Sends as** names, issue/revoke API tokens | **lead** |
 | `/login/` | Sign in — name list, or Google | anyone |
 | `/admin/` | Django admin | superuser (password auth, separate) |
@@ -527,8 +598,8 @@ replaces the rows and would otherwise take the listeners with them.
 ### Local agent — `http://localhost:8111`
 
 Single page: campaign picker → CC/BCC → Verify Gmail → contact table (with tags,
-stage badge and a ✎ inline editor per row) → Preflight → Send, plus **Resolve
-stranded drafts**. Editing CC/BCC re-locks Send until you preflight again, so
+stage badge and a ✎ inline editor per row) → Preflight → **Send** or
+**Schedule…**, plus a **Scheduled** panel and **Resolve stranded drafts**. Editing CC/BCC re-locks Send until you preflight again, so
 the addresses that go out are always ones the dry run showed you.
 
 ---
@@ -548,6 +619,12 @@ All endpoints take `Authorization: Token <key>` and live under `/api/v1/`.
 | `POST` | `/mailings/claim` | reserve DRAFTs, returns the rendered mail and its envelope |
 | `POST` | `/mailings/<id>/result` | record sent/failed |
 | `GET` | `/mailings/drafts` | stranded DRAFTs to reconcile |
+| `GET`/`POST` | `/schedules` | list, or queue a send for later |
+| `POST` | `/schedules/claim` | lease due jobs; also sweeps stale leases, missed jobs and follow-ups |
+| `POST` | `/schedules/<id>/progress` | report a slice, advance the cursor |
+| `POST` | `/schedules/<id>/cancel` · `/reschedule` | |
+| `GET` | `/replies/scan` | threads worth re-reading for a reply |
+| `POST` | `/replies/<mailing_id>` | report what Gmail said |
 
 Contact payload:
 
@@ -606,6 +683,8 @@ no laptop to update.
 | `importer.py` | `parse` → `ImportPreview`, `commit` |
 | `render.py` | `render`, `contact_context`, `MissingVariables` |
 | `richtext.py` | `to_html`, `to_plain`, `validate_links`, `validate_markup`, `extract_links`, `LINK_RE` |
+| `scheduling.py` | `create`, `claim_due`, `record_progress`, `cancel`, `reschedule`, `sweep_expired_leases`, `sweep_missed`, `in_window`, `next_open_slot`, `deliver_after`, `deadline` |
+| `followups.py` | `threads_to_check`, `record_reply_scan`, `queue_follow_ups`, `run_all_rules`, `cancel_pending_for` |
 | `auth.py` | `login_member`, `current_member`, `name_login_allowed`, `member_from_google_callback`, `SESSION_KEY` |
 
 Two guards worth knowing about:
@@ -971,7 +1050,7 @@ Then point each member's `AGENT_API_BASE_URL` at the public HTTPS host.
 .venv/bin/python -m pytest          # needs docker compose up
 ```
 
-**116 tests**, all passing:
+**181 tests**, all passing:
 
 | File | Count | Covers |
 |---|---|---|
@@ -981,6 +1060,8 @@ Then point each member's `AGENT_API_BASE_URL` at the public HTTPS host.
 | `test_login.py` | 11 | the two doors — see §4.1 |
 | `test_campaign_links.py` | 17 | link syntax, escaping, scheme rejection, both body parts |
 | `test_campaign_headers.py` | 23 | sender name, CC/BCC validation and snapshot, HTML bodies |
+| `test_scheduling.py` | 48 | the queue, the lease, the sending window, grace, drip |
+| `test_followups.py` | 17 | reply detection, who gets chased, the lifecycle opt-in |
 
 The single most important test:
 
@@ -1107,7 +1188,7 @@ ignite_crm/
 │       ├── migrations/            0001_initial, 0002_apitoken,
 │       │                          0003_contact_lifecycle_tags_archive
 │       ├── templates/crm/         14 templates
-│       └── tests/                 116 tests
+│       └── tests/                 181 tests
 │
 └── local_agent/
     ├── main.py                    lifespan identity checks + 12 routes
@@ -1153,6 +1234,32 @@ is preferable to sending without a record.
 ---
 
 ## 22. Change log
+
+### Phase 5 — scheduled sending (branch `mail_schedule`)
+
+**Schema — migrations `0006`, `0007`, `0008`**
+- `ScheduledSend`: the queue. Campaign, member, a snapshot of the selection, a
+  cursor, a lease, and drip settings.
+- `FollowUpRule`; `replied_at` / `reply_checked_at` / `followed_up_at` on
+  `campaign_mailings`.
+
+**The feature**
+- Schedule a send from the agent for any future time; an always-on agent in
+  Docker executes it. See `docs/MAIL_SCHEDULING.md` for why it has to work that
+  way — the Gmail API has no `sendAt`.
+- A sending window (09:00–19:00 IST by default) and a six-hour grace period,
+  after which a job is `missed` rather than arriving at 3am.
+- Drip: 20 contacts every 30 minutes instead of 200 at once.
+- Follow-ups: chase whoever did not reply after N days, with reply detection
+  reading the Gmail thread the original mail created.
+- `/schedules/` in the CRM shows every member's queue and leads with anything
+  `missed` or `failed`.
+- 65 new tests; 181 total.
+
+**One documented rule changed.** `shared/enums.py` said NEW→CONTACTED was the
+only automatic lifecycle transition. Follow-ups add CONTACTED→REPLIED, opt-in
+per rule, justified by a reply being observed rather than inferred. Neither
+transition can override a state a human chose.
 
 ### Phase 4 — what the mail actually looks like
 
@@ -1259,6 +1366,19 @@ of one to your own address before pointing it at real prospects.**
 **The local agent does not hot-reload.** It is run with plain `uvicorn`, no
 `--reload`, so a change under `local_agent/` does nothing until the process is
 restarted. This has already once looked exactly like a broken feature.
+
+**Scheduled sending is only as reliable as where the agent runs.** Gmail has no
+`sendAt`, so a scheduled mail goes out only while an agent is running for that
+member (§5.3). One always-on container covers one account; everyone else's
+scheduled mail waits for their laptop, and is marked `missed` if the grace
+window closes first. That is a deployment property, not a bug to fix in code —
+but it is the first thing to check when a scheduled send did not arrive.
+
+**Reply detection reads the thread, not the meaning.** A follow-up is cancelled
+by any message from the prospect's address in the thread, including "wrong
+person" or an out-of-office. That is the right trade — chasing someone who
+replied is far worse than not chasing someone who bounced a holiday
+autoresponder — but it is not sentiment analysis.
 
 **Dev credentials are in the repo.** `docker-compose.yml` uses `ignite:ignite`.
 Harmless on localhost, but visible in a public org repo.

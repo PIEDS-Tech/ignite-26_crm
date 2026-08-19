@@ -10,12 +10,16 @@ from dataclasses import asdict
 from django.core.exceptions import PermissionDenied
 from django.core.exceptions import ValidationError as DjangoValidationError
 from django.http import JsonResponse
+from django.utils import timezone
+from django.utils.dateparse import parse_datetime
 from django.views.decorators.http import require_GET, require_POST
 
-from crm.models import Campaign, CampaignMailing, Contact
+from crm.models import Campaign, CampaignMailing, Contact, ScheduledSend
 from crm.services import contacts as contact_svc
 from crm.services import mailing as mailing_svc
-from shared.enums import CampaignStatus, MailingStatus
+from crm.services import followups as followup_svc
+from crm.services import scheduling as schedule_svc
+from shared.enums import TERMINAL_SCHEDULE_STATUSES, CampaignStatus, MailingStatus
 
 from .auth import api_token_required, json_error, parse_json
 
@@ -270,19 +274,215 @@ def report_result(request, mailing_id):
 @api_token_required
 def drafts(request):
     """DRAFTs stranded by an agent that died between claim and report."""
+    # Paged, and without the bodies. An interrupted 400-contact batch leaves 400
+    # of these, and reconcile only needs the address and subject to ask Gmail
+    # "did this go out?" -- shipping 400 rendered mails to answer that was
+    # megabytes of response on the connection that had just proved unreliable.
+    limit = min(int(request.GET.get("limit", 100) or 100), 500)
+    qs = mailing_svc.stranded_drafts(request.member)
+
+    return JsonResponse({
+        "total": qs.count(),
+        "drafts": [
+            {
+                "mailing_id": str(m.id),
+                "campaign": m.campaign.title,
+                "to": m.contact.email,
+                "name": m.contact.full_name,
+                "subject": m.rendered_subject,
+                "created_at": m.created_at.isoformat(),
+            }
+            for m in qs[:limit]
+        ],
+    })
+
+
+# ----------------------------------------------------------- scheduled sends
+# The agent cannot schedule anything by itself: it posts an intent, the server
+# validates it, stores it, and later hands it back when it is due. Same division
+# as the claim protocol -- the laptop supplies Gmail, the server supplies truth.
+
+def _parse_when(raw):
+    """ISO 8601 with an offset -> aware datetime, or None."""
+    if not raw:
+        return None
+    when = parse_datetime(raw)
+    if when is None:
+        return None
+    return timezone.make_aware(when) if timezone.is_naive(when) else when
+
+
+@api_token_required
+def schedules(request):
+    """GET the caller's jobs, POST a new one."""
+    if request.method == "GET":
+        qs = (
+            ScheduledSend.objects.filter(member=request.member)
+            .select_related("campaign", "member")
+        )
+        status = request.GET.get("status")
+        if status == "open":
+            qs = qs.exclude(status__in=TERMINAL_SCHEDULE_STATUSES)
+        elif status:
+            qs = qs.filter(status=status)
+        return JsonResponse([schedule_svc.as_json(j) for j in qs[:200]], safe=False)
+
+    if request.method != "POST":
+        return json_error("GET or POST only.", status=405)
+
+    payload, error = parse_json(request)
+    if error:
+        return error
+
+    when = _parse_when(payload.get("scheduled_at"))
+    if when is None:
+        return json_error("scheduled_at must be an ISO 8601 datetime with an offset.")
+
+    try:
+        job = schedule_svc.create(
+            campaign_id=payload.get("campaign_id"),
+            member=request.member,
+            contact_ids=payload.get("contact_ids") or [],
+            scheduled_at=when,
+            cc=payload.get("cc", ""),
+            bcc=payload.get("bcc", ""),
+            batch_size=payload.get("batch_size", 0),
+            interval_minutes=payload.get("interval_minutes", 0),
+        )
+    except schedule_svc.NotSchedulable as exc:
+        return json_error(str(exc))
+
+    return JsonResponse(schedule_svc.as_json(job), status=201)
+
+
+@require_POST
+@api_token_required
+def schedule_claim(request):
+    """Lease everything due for this agent's member.
+
+    Sweeping expired leases here rather than on a separate timer: every agent
+    polls this endpoint anyway, so the recovery path runs as often as the thing
+    it recovers from, with no extra process to keep alive.
+    """
+    payload, _ = parse_json(request)
+    payload = payload or {}
+
+    swept = schedule_svc.sweep_expired_leases()
+    # Retiring jobs nothing ran in time belongs here for the same reason as the
+    # lease sweep: every agent polls this anyway, so the housekeeping runs as
+    # often as the thing it cleans up, with no extra process to keep alive.
+    missed = schedule_svc.sweep_missed()
+    # Queue any follow-ups that have come due. Same reasoning as the sweeps:
+    # every agent polls this anyway, so there is no separate timer to keep alive.
+    queued = len(followup_svc.run_all_rules())
+    jobs = schedule_svc.claim_due(
+        request.member,
+        agent_id=str(payload.get("agent_id", ""))[:80],
+        limit=int(payload.get("limit", 5) or 5),
+    )
+
+    return JsonResponse({
+        "requeued_stale": swept,
+        "marked_missed": missed,
+        "follow_ups_queued": queued,
+        "claimed": [
+            {**schedule_svc.as_json(j), "contact_ids": j.next_slice(j.batch_size or None)}
+            for j in jobs
+        ],
+    })
+
+
+@require_POST
+@api_token_required
+def schedule_progress(request, schedule_id):
+    payload, error = parse_json(request)
+    if error:
+        return error
+
+    if payload.get("failed"):
+        schedule_svc.mark_failed(schedule_id, request.member, payload.get("error", ""))
+        return JsonResponse({"status": "failed"})
+
+    return JsonResponse(schedule_svc.record_progress(
+        schedule_id,
+        request.member,
+        attempted=payload.get("attempted", 0),
+        sent=payload.get("sent", 0),
+        skipped=payload.get("skipped", 0),
+        error=payload.get("error", ""),
+    ))
+
+
+@require_POST
+@api_token_required
+def schedule_cancel(request, schedule_id):
+    try:
+        job = schedule_svc.cancel(schedule_id, member=request.member)
+    except schedule_svc.NotSchedulable as exc:
+        return json_error(str(exc))
+    return JsonResponse(schedule_svc.as_json(job))
+
+
+@require_POST
+@api_token_required
+def schedule_reschedule(request, schedule_id):
+    payload, error = parse_json(request)
+    if error:
+        return error
+
+    when = _parse_when(payload.get("scheduled_at"))
+    if when is None:
+        return json_error("scheduled_at must be an ISO 8601 datetime with an offset.")
+
+    try:
+        job = schedule_svc.reschedule(schedule_id, when, member=request.member)
+    except schedule_svc.NotSchedulable as exc:
+        return json_error(str(exc))
+    return JsonResponse(schedule_svc.as_json(job))
+
+
+# --------------------------------------------------------------- follow-ups
+# Only the agent can read Gmail, so only the agent can answer "did they reply?".
+# It reports the fact and stops there -- acting on it is the server's job.
+
+@require_GET
+@api_token_required
+def reply_scan(request):
+    """Threads worth re-reading for this member."""
     return JsonResponse([
         {
             "mailing_id": str(m.id),
+            "thread_id": m.mail_thread_id,
+            "email": m.contact.email,
             "campaign": m.campaign.title,
-            "to": m.contact.email,
-            "name": m.contact.full_name,
-            "subject": m.rendered_subject,
-            "body": m.rendered_body,
-            "body_html": m.rendered_body_html,
-            "from_name": m.from_name,
-            "cc": m.cc,
-            "bcc": m.bcc,
-            "created_at": m.created_at.isoformat(),
+            "sent_at": m.sent_at.isoformat() if m.sent_at else None,
         }
-        for m in mailing_svc.stranded_drafts(request.member)
+        for m in followup_svc.threads_to_check(request.member)
     ], safe=False)
+
+
+@require_POST
+@api_token_required
+def reply_report(request, mailing_id):
+    payload, error = parse_json(request)
+    if error:
+        return error
+
+    result = followup_svc.record_reply_scan(
+        mailing_id, request.member, replied=bool(payload.get("replied"))
+    )
+
+    # A reply that lands after the follow-up was queued but before it went out
+    # is the one window where we would otherwise chase someone who has already
+    # answered. Pull them back out of the queue.
+    if result.get("status") == "replied":
+        try:
+            mailing = CampaignMailing.objects.select_related("campaign").get(id=mailing_id)
+        except (CampaignMailing.DoesNotExist, ValueError, TypeError):
+            return JsonResponse(result)
+        for rule in mailing.campaign.follow_up_rules.filter(is_active=True):
+            result["pulled_from_queue"] = followup_svc.cancel_pending_for(
+                mailing.contact_id, rule.follow_up_id
+            )
+
+    return JsonResponse(result)

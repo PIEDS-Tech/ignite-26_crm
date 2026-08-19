@@ -119,6 +119,29 @@ LOGIN_URL = "/login/"
 LOGIN_REDIRECT_URL = "/"
 LOGOUT_REDIRECT_URL = "/login/"
 
+# --- scheduled sending ----------------------------------------------------
+# Gmail has no sendAt, so a scheduled mail goes out only when an agent is awake
+# to send it. These two settings decide what "on time" means. See
+# docs/MAIL_SCHEDULING.md.
+
+#: Delivery window, in TIME_ZONE. A job falling due outside it waits for the
+#: next open slot rather than mailing a prospect at three in the morning.
+#: Set SCHEDULE_QUIET_START == SCHEDULE_QUIET_END to disable the window.
+SCHEDULE_WINDOW_START = env.int("SCHEDULE_WINDOW_START", default=9)
+SCHEDULE_WINDOW_END = env.int("SCHEDULE_WINDOW_END", default=19)
+
+#: Weekdays mail may go out. Monday is 0, matching datetime.weekday().
+#: Default is all seven; set e.g. 0,1,2,3,4 for weekdays only.
+SCHEDULE_WINDOW_DAYS = env.list(
+    "SCHEDULE_WINDOW_DAYS", cast=int, default=[0, 1, 2, 3, 4, 5, 6]
+)
+
+#: How late a job may still go out. Measured from the moment it was first
+#: ALLOWED to run, not from scheduled_at -- a job deferred overnight by the
+#: window must not be declared missed for a lateness it could not avoid.
+SCHEDULE_GRACE_HOURS = env.int("SCHEDULE_GRACE_HOURS", default=6)
+
+
 # --- who may sign in ------------------------------------------------------
 # Batch 2024 picks a name; batch 2025 signs in with Google. The reasoning is in
 # crm/services/auth.py. This is a WEB OAuth client -- distinct from the DESKTOP

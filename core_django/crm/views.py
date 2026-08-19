@@ -3,14 +3,23 @@ from django.core.exceptions import PermissionDenied, ValidationError
 from django.core.paginator import Paginator
 from django.db.models import Count, Q
 from django.shortcuts import get_object_or_404, redirect, render
+from datetime import timedelta
+
 from django.utils import timezone
 from django.views.decorators.http import require_POST
 
-from shared.enums import CampaignStatus, ContactLifecycle, MailingStatus
+from shared.enums import (
+    TERMINAL_SCHEDULE_STATUSES,
+    CampaignStatus,
+    ContactLifecycle,
+    MailingStatus,
+    ScheduleStatus,
+)
 
 from .forms import BulkEditForm, CampaignForm, ContactForm, CsvUploadForm, NoteForm, TokenForm
-from .models import ApiToken, Campaign, CampaignMailing, Contact, TeamMember
+from .models import ApiToken, Campaign, CampaignMailing, Contact, ScheduledSend, TeamMember
 from .services import assignment, importer
+from .services import scheduling as schedule_svc
 from .services import campaigns as campaign_svc
 from .services import contacts as contact_svc
 from .services.permissions import (
@@ -26,6 +35,11 @@ from .services.render import render as render_mail   # not django.shortcuts.rend
 #: Preview payloads are held in the session between the upload and confirm
 #: steps. Small enough for a session cookie backend and avoids a temp table.
 IMPORT_SESSION_KEY = "pending_import"
+
+#: After this long, a DRAFT mailing is stuck rather than sending. A batch paces
+#: itself at a couple of seconds per mail, so anything older than this was
+#: abandoned by an agent that stopped.
+STRANDED_AFTER_MINUTES = 15
 
 
 def _base(request, **extra):
@@ -401,6 +415,17 @@ def campaign_detail(request, pk):
                        MailingStatus.FAILED.value)
     }
 
+    # A DRAFT more than a few minutes old is not "in flight" -- nothing is going
+    # to happen to it on its own, and until it is resolved that contact cannot
+    # be mailed for this campaign at all. Showing it as activity is how an
+    # interrupted batch reads as a working one.
+    stranded = mailings.filter(
+        status=MailingStatus.DRAFT.value,
+        created_at__lt=timezone.now() - timedelta(minutes=STRANDED_AFTER_MINUTES),
+    ).count()
+    counts["stranded"] = stranded
+    counts["in_flight"] = counts[MailingStatus.DRAFT.value] - stranded
+
     # Render against a real assigned contact so the preview shows what a
     # recipient actually receives, not the raw template.
     sample = Contact.objects.filter(assigned_to__isnull=False).first()
@@ -416,6 +441,11 @@ def campaign_detail(request, pk):
         mailings=Paginator(mailings, 100).get_page(request.GET.get("page")),
         assigned_pool=Contact.objects.filter(assigned_to__isnull=False).count(),
         preview=preview, preview_error=preview_error, sample=sample,
+        stranded_members=(
+            mailings.filter(status=MailingStatus.DRAFT.value)
+            .values_list("sent_by__name", flat=True).distinct()
+            if stranded else []
+        ),
         transitions=campaign_svc.ALLOWED_TRANSITIONS[CampaignStatus(campaign.status)],
     ))
 
@@ -452,6 +482,55 @@ def campaign_transition(request, pk):
         detail = "; ".join(exc.messages) if isinstance(exc, ValidationError) else str(exc)
         messages.error(request, detail)
     return redirect("crm:campaign_detail", pk=pk)
+
+
+# ------------------------------------------------------------ scheduled sends
+
+@member_required
+def schedule_list(request):
+    """Every scheduled send, across the whole team.
+
+    This page exists because the executor is somebody's laptop or container. A
+    job that quietly never ran -- nothing was awake, the campaign got paused --
+    is invisible from the agent that queued it and dead obvious here. `missed`
+    and `failed` are surfaced first for exactly that reason.
+    """
+    jobs = ScheduledSend.objects.select_related("campaign", "member", "created_by")
+
+    status = request.GET.get("status", "open")
+    if status == "open":
+        jobs = jobs.exclude(status__in=TERMINAL_SCHEDULE_STATUSES)
+    elif status and status != "all":
+        jobs = jobs.filter(status=status)
+
+    needs_attention = ScheduledSend.objects.filter(
+        status__in=[ScheduleStatus.MISSED.value, ScheduleStatus.FAILED.value]
+    ).select_related("campaign", "member")[:10]
+
+    return render(request, "crm/schedule_list.html", _base(
+        request,
+        page=Paginator(jobs, 50).get_page(request.GET.get("page")),
+        needs_attention=needs_attention,
+        statuses=ScheduleStatus.choices(),
+        current_status=status,
+    ))
+
+
+@lead_required
+@require_POST
+def schedule_cancel(request, pk):
+    """Call off a queued send. Lead-only: it may be someone else's job."""
+    try:
+        job = schedule_svc.cancel(pk)
+    except schedule_svc.NotSchedulable as exc:
+        messages.error(request, str(exc))
+    else:
+        messages.success(
+            request,
+            f"Cancelled the {job.campaign.title!r} send for {job.member.name}. "
+            "Anything already sent stays sent.",
+        )
+    return redirect("crm:schedule_list")
 
 
 # ------------------------------------------------------------ team & tokens

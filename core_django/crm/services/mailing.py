@@ -88,6 +88,10 @@ class Skipped:
     email: str
     name: str
     reason: str
+    #: The outcome code, so the agent does not have to parse English to colour
+    #: a row. It used to match on substrings of `reason`, which meant rewording
+    #: a message silently turned "already mailed" into "failed" in the UI.
+    code: str = ALREADY_MAILED
 
 
 @dataclass
@@ -143,6 +147,8 @@ def unmailable_reason(contact) -> tuple[str, str] | None:
 
 def preflight(campaign, member, contact_ids) -> list[dict]:
     """Dry run. Writes nothing; tells the user exactly what will happen."""
+    # FAILED is deliberately absent: those are re-claimable now, so counting
+    # them as "already mailed" would make the dry run disagree with the send.
     already = set(
         CampaignMailing.objects.filter(
             campaign=campaign,
@@ -198,7 +204,8 @@ def claim_batch(campaign, member, contact_ids, *, cc="", bcc="") -> tuple[list[C
     for contact_id in contact_ids:
         if budget <= 0:
             skipped.append(
-                Skipped(str(contact_id), "", "", f"daily cap of {DAILY_SEND_CAP} reached")
+                Skipped(str(contact_id), "", "",
+                        f"daily cap of {DAILY_SEND_CAP} reached", CAP_REACHED)
             )
             continue
 
@@ -212,7 +219,7 @@ def claim_batch(campaign, member, contact_ids, *, cc="", bcc="") -> tuple[list[C
                 if contact.assigned_to_id != member.id:
                     skipped.append(
                         Skipped(str(contact.id), contact.email, contact.full_name,
-                                "not assigned to you")
+                                "not assigned to you", NOT_ASSIGNED)
                     )
                     continue
 
@@ -222,7 +229,8 @@ def claim_batch(campaign, member, contact_ids, *, cc="", bcc="") -> tuple[list[C
                 blocked = unmailable_reason(contact)
                 if blocked:
                     skipped.append(
-                        Skipped(str(contact.id), contact.email, contact.full_name, blocked[1])
+                        Skipped(str(contact.id), contact.email, contact.full_name,
+                                blocked[1], blocked[0])
                     )
                     continue
 
@@ -230,28 +238,80 @@ def claim_batch(campaign, member, contact_ids, *, cc="", bcc="") -> tuple[list[C
                     rendered = render(campaign, contact)
                 except MissingVariables as exc:
                     skipped.append(
-                        Skipped(str(contact.id), contact.email, contact.full_name, str(exc))
+                        Skipped(str(contact.id), contact.email, contact.full_name,
+                                str(exc), MISSING_VARS)
                     )
                     continue
 
-                # The unique constraint fires here for a duplicate. This is the
-                # entire idempotency guarantee -- a double-click, a retry, or
-                # two agents racing all collide at the database rather than
-                # putting a second copy in a prospect's inbox.
-                mailing = CampaignMailing.objects.create(
-                    campaign=campaign,
-                    contact=contact,
-                    sent_by=member,
-                    status=MailingStatus.DRAFT.value,
-                    rendered_subject=rendered.subject,
-                    rendered_body=rendered.body,
-                    rendered_body_html=rendered.body_html,
-                    from_name=from_name,
-                    cc=cc,
-                    bcc=bcc,
+                # A previous attempt that we KNOW did not reach anyone is
+                # re-used rather than refused. Without this a failed mail is
+                # unfixable: the row blocks every future claim, so the contact
+                # can never be mailed for this campaign again, and the operator
+                # sees "already has a mailing" for someone who never got one.
+                #
+                # Only FAILED qualifies. SENT is the guarantee itself and is
+                # never touched. DRAFT means "claimed, outcome unknown" -- it
+                # may be sitting in a prospect's inbox with the report lost, so
+                # it must go through reconcile against Gmail first. That is the
+                # whole reason DRAFT and FAILED are different states.
+                existing = (
+                    CampaignMailing.objects
+                    .select_for_update()
+                    .filter(campaign=campaign, contact=contact)
+                    .first()
                 )
+
+                if existing and existing.status != MailingStatus.FAILED.value:
+                    skipped.append(
+                        Skipped(
+                            str(contact.id), contact.email, contact.full_name,
+                            "already has a mailing (sent)"
+                            if existing.status == MailingStatus.SENT.value
+                            else "already has a mailing (claimed but unresolved; "
+                                 "run Resolve stranded drafts)",
+                            ALREADY_MAILED,
+                        )
+                    )
+                    continue
+
+                if existing:
+                    # Re-render rather than reuse the old snapshot: the template
+                    # or the contact may have been fixed since it failed, and
+                    # that fix is usually WHY someone is retrying.
+                    existing.status = MailingStatus.DRAFT.value
+                    existing.sent_by = member
+                    existing.rendered_subject = rendered.subject
+                    existing.rendered_body = rendered.body
+                    existing.rendered_body_html = rendered.body_html
+                    existing.from_name = from_name
+                    existing.cc = cc
+                    existing.bcc = bcc
+                    existing.error_detail = ""
+                    existing.mail_message_id = ""
+                    existing.mail_thread_id = ""
+                    existing.save()
+                    mailing = existing
+                else:
+                    # The unique constraint still fires here for a genuine race.
+                    # This is the entire idempotency guarantee -- a double-click
+                    # or two agents racing collide at the database rather than
+                    # putting a second copy in a prospect's inbox.
+                    mailing = CampaignMailing.objects.create(
+                        campaign=campaign,
+                        contact=contact,
+                        sent_by=member,
+                        status=MailingStatus.DRAFT.value,
+                        rendered_subject=rendered.subject,
+                        rendered_body=rendered.body,
+                        rendered_body_html=rendered.body_html,
+                        from_name=from_name,
+                        cc=cc,
+                        bcc=bcc,
+                    )
         except Contact.DoesNotExist:
-            skipped.append(Skipped(str(contact_id), "", "", "contact no longer exists"))
+            skipped.append(
+                Skipped(str(contact_id), "", "", "contact no longer exists", FAILED)
+            )
             continue
         except IntegrityError:
             contact = Contact.objects.filter(id=contact_id).first()
@@ -259,7 +319,7 @@ def claim_batch(campaign, member, contact_ids, *, cc="", bcc="") -> tuple[list[C
                 Skipped(str(contact_id),
                         contact.email if contact else "",
                         contact.full_name if contact else "",
-                        "already has a mailing")
+                        "already has a mailing", ALREADY_MAILED)
             )
             continue
 

@@ -1,6 +1,14 @@
 from django.contrib import admin
 
-from .models import Campaign, CampaignMailing, Contact, ContactNote, TeamMember
+from .models import (
+    Campaign,
+    CampaignMailing,
+    Contact,
+    ContactNote,
+    FollowUpRule,
+    ScheduledSend,
+    TeamMember,
+)
 
 
 @admin.register(TeamMember)
@@ -53,3 +61,25 @@ class CampaignMailingAdmin(admin.ModelAdmin):
     list_filter = ("status", "campaign", "sent_by")
     search_fields = ("contact__email", "mail_thread_id")
     readonly_fields = ("rendered_subject", "rendered_body", "error_detail")
+
+
+@admin.register(ScheduledSend)
+class ScheduledSendAdmin(admin.ModelAdmin):
+    """Read-mostly. Cancelling belongs on /schedules/, which explains itself and
+    says out loud that mail already sent stays sent."""
+
+    list_display = ("campaign", "member", "scheduled_at", "status", "progress", "next_run_at")
+    list_filter = ("status", "campaign", "member")
+    readonly_fields = ("cursor", "sent_count", "skipped_count", "attempts",
+                       "leased_by", "lease_expires_at", "started_at", "finished_at")
+
+    @admin.display(description="progress")
+    def progress(self, obj):
+        return f"{obj.cursor}/{obj.total}"
+
+
+@admin.register(FollowUpRule)
+class FollowUpRuleAdmin(admin.ModelAdmin):
+    list_display = ("campaign", "follow_up", "delay_days", "mark_replied", "is_active")
+    list_filter = ("is_active", "mark_replied")
+    autocomplete_fields = ("campaign", "follow_up")

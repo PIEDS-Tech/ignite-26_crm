@@ -18,9 +18,11 @@ from django.utils import timezone
 
 from shared.enums import (
     BLOCKED_LIFECYCLES,
+    TERMINAL_SCHEDULE_STATUSES,
     CampaignStatus,
     ContactLifecycle,
     MailingStatus,
+    ScheduleStatus,
 )
 
 from .validators import batch_validator, phone_validator, validate_bits_email
@@ -334,6 +336,13 @@ class CampaignMailing(TimeStampedModel):
     error_detail = models.TextField(blank=True)
     sent_at = models.DateTimeField(null=True, blank=True)
 
+    # Follow-up bookkeeping. `replied_at` is set only when a reply is actually
+    # seen in the Gmail thread; `followed_up_at` stops a rule queueing the same
+    # follow-up twice on successive scans.
+    replied_at = models.DateTimeField(null=True, blank=True)
+    reply_checked_at = models.DateTimeField(null=True, blank=True)
+    followed_up_at = models.DateTimeField(null=True, blank=True)
+
     class Meta:
         db_table = "campaign_mailings"
         ordering = ["-created_at"]
@@ -352,3 +361,169 @@ class CampaignMailing(TimeStampedModel):
 
     def __str__(self):
         return f"{self.campaign_id} -> {self.contact_id} [{self.status}]"
+
+
+class ScheduledSend(TimeStampedModel):
+    """A campaign send lined up for later.
+
+    Gmail has no server-side scheduling -- there is no `sendAt` on the API -- so
+    this row is not a promise to Google, it is a note to ourselves that some
+    agent must pick up at the right moment. See docs/MAIL_SCHEDULING.md.
+
+    It stores WHEN and FOR WHOM. It stores nothing about how a mail is built:
+    that stays in services/render.py and is resolved at execution time against
+    whatever the campaign and the contact say then, not what they said when the
+    job was created. Scheduling a send is not a way to freeze a template.
+    """
+
+    campaign = models.ForeignKey(Campaign, on_delete=models.PROTECT, related_name="schedules")
+
+    # Whose Gmail sends this, and therefore the only agent permitted to execute
+    # it. An agent authenticates as exactly one member; letting it run someone
+    # else's job would send from the wrong mailbox and record a false sent_by.
+    member = models.ForeignKey(TeamMember, on_delete=models.PROTECT, related_name="schedules")
+    created_by = models.ForeignKey(
+        TeamMember, on_delete=models.SET_NULL, null=True, related_name="+"
+    )
+
+    #: Snapshot of the selection. Deliberately ids and not a M2M: this is a
+    #: record of intent at scheduling time, and claim_batch re-checks every one
+    #: of them under a lock anyway (assignment, archived, lifecycle, cap).
+    contact_ids = ArrayField(models.UUIDField(), default=list)
+
+    #: Index of the next contact to attempt. Progress is a cursor rather than
+    #: "contacts that still lack a mailing" because a permanently skipped
+    #: contact -- unassigned, archived, do_not_contact -- never gets a mailing
+    #: row at all, and that query would leave the job running forever.
+    cursor = models.PositiveIntegerField(default=0)
+
+    scheduled_at = models.DateTimeField(db_index=True)
+
+    # --- drip ------------------------------------------------------------
+    # Zero batch_size means "the whole thing at once", which is the one-off
+    # send. Anything else spreads the job across ticks: 200 mails leaving one
+    # mailbox in one minute is both a deliverability signal and an unrecoverable
+    # mistake if the template was wrong.
+    batch_size = models.PositiveIntegerField(
+        default=0, help_text="Contacts per run. 0 sends the whole selection at once."
+    )
+    interval_minutes = models.PositiveIntegerField(
+        default=0, help_text="Wait between batches. Ignored unless batch_size is set."
+    )
+    #: When the next slice may go. Set after each batch; null means "now".
+    next_run_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    status = models.CharField(
+        max_length=12,
+        choices=ScheduleStatus.choices(),
+        default=ScheduleStatus.PENDING.value,
+        db_index=True,
+    )
+
+    # Same envelope the manual send path uses; validated by
+    # services/mailing.py::parse_copy_addresses before it ever lands here.
+    cc = models.CharField(max_length=500, blank=True)
+    bcc = models.CharField(max_length=500, blank=True)
+
+    # The lease. An expired lease on a RUNNING job means its executor died
+    # mid-batch; a sweep returns it to PENDING. This is a scheduling
+    # convenience, NOT the safety mechanism -- uniq_campaign_contact is what
+    # actually makes a double execution harmless.
+    leased_by = models.CharField(max_length=80, blank=True)
+    lease_expires_at = models.DateTimeField(null=True, blank=True)
+
+    sent_count = models.PositiveIntegerField(default=0)
+    skipped_count = models.PositiveIntegerField(default=0)
+    attempts = models.PositiveIntegerField(default=0)
+
+    last_error = models.TextField(blank=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "scheduled_sends"
+        ordering = ["scheduled_at"]
+        indexes = [
+            # The due query, run every 60s by every agent.
+            models.Index(fields=["status", "scheduled_at"]),
+            models.Index(fields=["member", "status"]),
+        ]
+
+    def __str__(self):
+        return f"{self.campaign_id} x{len(self.contact_ids)} @ {self.scheduled_at:%Y-%m-%d %H:%M} [{self.status}]"
+
+    @property
+    def total(self) -> int:
+        return len(self.contact_ids)
+
+    @property
+    def remaining(self) -> int:
+        return max(0, self.total - self.cursor)
+
+    @property
+    def is_terminal(self) -> bool:
+        return self.status in TERMINAL_SCHEDULE_STATUSES
+
+    def next_slice(self, size=None) -> list:
+        """The contacts to attempt on this tick.
+
+        `size=None` means the whole remainder, which is what a one-off send
+        wants. Phase 4 passes a batch size to drip instead.
+        """
+        end = self.total if size is None else min(self.total, self.cursor + size)
+        return [str(cid) for cid in self.contact_ids[self.cursor:end]]
+
+
+class FollowUpRule(TimeStampedModel):
+    """Send a second campaign to whoever did not reply to the first.
+
+    Reply detection is real evidence, not inference: every sent mailing records
+    its Gmail thread id, and the agent asks Gmail whether that thread gained a
+    message from the contact. Compare ContactLifecycle, where guessing "bounced"
+    from an SMTP string was deliberately refused -- this is the opposite case,
+    an observed fact rather than a reading of tea leaves.
+    """
+
+    campaign = models.ForeignKey(
+        Campaign, on_delete=models.CASCADE, related_name="follow_up_rules",
+        help_text="The campaign whose silence we are following up on.",
+    )
+    follow_up = models.ForeignKey(
+        Campaign, on_delete=models.PROTECT, related_name="follows_from",
+        help_text="What to send them instead.",
+    )
+    delay_days = models.PositiveIntegerField(
+        default=3, help_text="Days of silence before the follow-up is queued."
+    )
+    is_active = models.BooleanField(default=True)
+
+    #: Off by default and per rule, because it moves a contact through the
+    #: funnel automatically. shared/enums.py documents NEW -> CONTACTED as the
+    #: only automatic transition; this is the second, and it is opt-in so that
+    #: rule stays a decision rather than an accident.
+    mark_replied = models.BooleanField(
+        default=False,
+        help_text="Also set the contact's lifecycle to Replied when a reply is seen.",
+    )
+
+    created_by = models.ForeignKey(
+        TeamMember, on_delete=models.SET_NULL, null=True, related_name="+"
+    )
+
+    class Meta:
+        db_table = "follow_up_rules"
+        ordering = ["-created_at"]
+        constraints = [
+            # One rule per pair: two rules chaining the same campaigns would
+            # queue the same follow-up twice.
+            models.UniqueConstraint(
+                fields=["campaign", "follow_up"], name="uniq_followup_pair"
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.campaign_id} -> {self.follow_up_id} after {self.delay_days}d"
+
+    def clean(self):
+        from django.core.exceptions import ValidationError
+        if self.campaign_id and self.campaign_id == self.follow_up_id:
+            raise ValidationError("A campaign cannot follow up on itself.")

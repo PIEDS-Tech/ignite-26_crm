@@ -39,6 +39,7 @@
         <button class="btn-outline" onclick="verifyAuth()">Verify Gmail</button>
         <button class="btn-outline" onclick="preflight()" id="preflightBtn" disabled>Preflight</button>
         <button class="btn" onclick="send()" id="sendBtn" disabled>Send</button>
+        <button class="btn-outline" onclick="openSchedule()" id="scheduleBtn" disabled>Schedule…</button>
         <span class="grow"></span>
         <button class="btn-ghost btn-sm" onclick="reconcile()" title="Resolve drafts left by a crash">
           Resolve stranded drafts
@@ -86,10 +87,66 @@
             Run a preflight to see exactly what will be sent, and to whom.
           </div>
         </section>
+        <header style="border-top:1px solid var(--color-border);padding-top:.75rem">
+          <h2>Scheduled</h2>
+          <p class="muted text-xs">
+            Sent by whichever agent is running for your account when they fall due.
+          </p>
+        </header>
+        <section>
+          <div id="schedList" class="text-sm muted">Nothing scheduled.</div>
+        </section>
       </div>
     </div>
   </main>
 </div>
+
+<!-- Schedule dialog. Local time in, ISO-with-offset out: see saveSchedule(). -->
+<dialog id="schedDlg" class="dialog">
+  <article style="min-width:min(28rem,90vw)">
+    <header>
+      <h2>Schedule this send</h2>
+      <p class="text-xs muted">
+        Times are your local time. The mail goes out only while an agent is
+        running for your account — see docs/MAIL_SCHEDULING.md.
+      </p>
+    </header>
+    <section class="col">
+      <p class="text-sm" id="sched-summary"></p>
+      <div class="row" style="gap:.5rem">
+        <div class="col grow" style="gap:.3rem">
+          <label class="label text-xs" for="sched-date">Date</label>
+          <input class="input" type="date" id="sched-date">
+        </div>
+        <div class="col grow" style="gap:.3rem">
+          <label class="label text-xs" for="sched-time">Time</label>
+          <input class="input" type="time" id="sched-time">
+        </div>
+      </div>
+      <div class="row" style="gap:.5rem">
+        <div class="col grow" style="gap:.3rem">
+          <label class="label text-xs" for="sched-batch">Batch size</label>
+          <input class="input" type="number" min="0" id="sched-batch" value="0">
+        </div>
+        <div class="col grow" style="gap:.3rem">
+          <label class="label text-xs" for="sched-interval">Minutes between batches</label>
+          <input class="input" type="number" min="0" id="sched-interval" value="0">
+        </div>
+      </div>
+      <p class="text-xs muted">
+        Leave batch size at 0 to send the whole selection in one go. Set it to
+        drip instead — 20 every 30 minutes reads far less like a blast, and
+        leaves room to stop after the first few if something looks wrong.
+      </p>
+      <p class="text-xs muted" id="sched-cc"></p>
+      <p class="text-xs s-FAILED" id="sched-error"></p>
+    </section>
+    <footer class="row">
+      <button class="btn" onclick="saveSchedule()">Schedule</button>
+      <button class="btn-ghost" onclick="closeSchedule()">Cancel</button>
+    </footer>
+  </article>
+</dialog>
 
 <!-- Inline contact editor. The point is narrow: fix a wrong designation or a
      misspelt first name BEFORE it gets rendered into a real mail. -->
@@ -267,6 +324,9 @@ function sync() {
   $('count').textContent = n;
   picks().forEach(p => p.closest('tr').classList.toggle('is-selected', p.checked));
   $('preflightBtn').disabled = n === 0;
+  // Scheduling does not need a preflight -- the server re-checks every contact
+  // under a lock when the job actually runs, exactly as an immediate send does.
+  $('scheduleBtn').disabled = n === 0 || !$('campaign').value;
   // Send stays locked until a preflight has actually vouched for the selection.
   if (n === 0) $('sendBtn').disabled = true;
 }
@@ -371,13 +431,32 @@ async function send() {
 }
 
 async function reconcile() {
+  // A stranded batch can be hundreds of rows and each one is a Gmail lookup,
+  // so this is slow by nature. Say so, and never dump 400 lines into alert().
+  const btn = event && event.target;
+  if (btn) { btn.disabled = true; btn.textContent = 'Resolving…'; }
+
   try {
     const out = await post('/api/reconcile');
-    alert(out.length
-      ? out.map(o => `${o.email}: ${o.status} — ${o.detail}`).join('\n')
-      : 'No stranded drafts.');
+    if (!out.length) {
+      alert('No stranded drafts. Nothing to resolve.');
+      return;
+    }
+
+    const sent = out.filter(o => o.status === 'SENT').length;
+    const failed = out.length - sent;
+    alert(
+      `Resolved ${out.length} stranded draft(s).\n\n` +
+      `${sent} had actually gone out and are now recorded as sent.\n` +
+      `${failed} never reached anyone and are marked failed — ` +
+      `select those contacts and send again to retry them.`
+    );
     await loadContacts();
-  } catch (e) { alert(e.message); }
+  } catch (e) {
+    alert(e.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Resolve stranded drafts'; }
+  }
 }
 
 $('selectAll').addEventListener('change', e => {
@@ -388,12 +467,126 @@ $('selectAll').addEventListener('change', e => {
 document.addEventListener('change', e => { if (e.target.matches('.pick')) sync(); });
 $('campaign').addEventListener('change', loadContacts);
 $('editDlg').addEventListener('cancel', () => Poll.resume());   // Esc key
+$('schedDlg').addEventListener('cancel', () => Poll.resume());
+
+// ---------------------------------------------------------------- scheduling
+
+function openSchedule() {
+  const ids = chosen();
+  if (!ids.length) return;
+
+  // Default to an hour out, rounded down to the minute -- a sensible "later
+  // today" that still forces a deliberate choice of time.
+  const when = new Date(Date.now() + 60 * 60 * 1000);
+  when.setSeconds(0, 0);
+  $('sched-date').value = when.toLocaleDateString('en-CA');            // YYYY-MM-DD, local
+  $('sched-time').value = when.toTimeString().slice(0, 5);             // HH:MM, local
+
+  const cc = $('cc').value.trim(), bcc = $('bcc').value.trim();
+  const copies = [cc ? `CC ${cc}` : '', bcc ? `BCC ${bcc}` : ''].filter(Boolean).join(' · ');
+  $('sched-summary').textContent =
+    `${ids.length} contact(s) from “${$('campaign').selectedOptions[0].textContent}”.`;
+  $('sched-cc').textContent = copies ? `Every one of them also copies: ${copies}` : '';
+  $('sched-error').textContent = '';
+
+  Poll.pause();                       // never let a refresh wipe the open dialog
+  $('schedDlg').showModal();
+}
+
+function closeSchedule() {
+  $('schedDlg').close();
+  Poll.resume();
+}
+
+async function saveSchedule() {
+  const date = $('sched-date').value, time = $('sched-time').value;
+  if (!date || !time) {
+    $('sched-error').textContent = 'Pick both a date and a time.';
+    return;
+  }
+
+  // Build the instant in LOCAL time, then send it with its offset. Posting
+  // "2026-08-20T09:00" bare would be read as 09:00 in the server's zone, which
+  // is how scheduled mail quietly goes out five and a half hours early.
+  const when = new Date(`${date}T${time}`);
+  if (isNaN(when)) {
+    $('sched-error').textContent = 'That date and time did not parse.';
+    return;
+  }
+  if (when.getTime() < Date.now()) {
+    $('sched-error').textContent = 'That time has already passed.';
+    return;
+  }
+
+  try {
+    await post('/api/schedules', {
+      campaign_id: $('campaign').value,
+      contact_ids: chosen(),
+      scheduled_at: when.toISOString(),
+      cc: $('cc').value.trim(),
+      bcc: $('bcc').value.trim(),
+      batch_size: parseInt($('sched-batch').value, 10) || 0,
+      interval_minutes: parseInt($('sched-interval').value, 10) || 0,
+    });
+  } catch (e) {
+    $('sched-error').textContent = e.message;
+    return;
+  }
+
+  closeSchedule();
+  await loadSchedules();
+  alert(`Scheduled for ${when.toLocaleString()}.`);
+}
+
+async function loadSchedules() {
+  let jobs = [];
+  try {
+    jobs = await req('/api/schedules?status=open');
+  } catch (e) {
+    return;                           // the panel is informational; never block on it
+  }
+
+  const box = $('schedList');
+  if (!jobs.length) {
+    box.innerHTML = '<p class="text-sm muted">Nothing scheduled.</p>';
+    return;
+  }
+
+  box.innerHTML = jobs.map(j => `
+    <div class="row-b" style="gap:.5rem;padding:.35rem 0;border-bottom:1px solid var(--color-border)">
+      <div>
+        <div class="text-sm">${esc(j.campaign)}</div>
+        <div class="text-xs muted">
+          ${new Date(j.next_run_at || j.scheduled_at).toLocaleString()} ·
+          ${j.remaining}/${j.total} to go ·
+          ${j.batch_size ? `${j.batch_size} every ${j.interval_minutes}m · ` : ''}
+          <span class="s-${esc(j.status).toUpperCase()}">${esc(j.status)}</span>
+          ${j.last_error ? '· ' + esc(j.last_error) : ''}
+        </div>
+      </div>
+      <button class="btn-ghost btn-sm" onclick="cancelSchedule('${j.id}')">Cancel</button>
+    </div>`).join('');
+}
+
+async function cancelSchedule(id) {
+  if (!confirm('Cancel this scheduled send? Mail already sent stays sent.')) return;
+  try {
+    await post(`/api/schedules/${id}/cancel`, {});
+  } catch (e) {
+    alert(e.message);
+  }
+  await loadSchedules();
+}
 
 loadCampaigns();
+loadSchedules();
 
 // Someone else's edit in the CRM shows up here within 20s, without a reload.
 window.addEventListener('load', () => {
   Poll.every(async () => {
+    // The schedule panel refreshes regardless of campaign selection: a job
+    // going out, or falling over, is worth seeing whatever the screen is on.
+    await loadSchedules();
     if (!$('campaign').value) return;
     await loadContacts();
     await refreshQuota();

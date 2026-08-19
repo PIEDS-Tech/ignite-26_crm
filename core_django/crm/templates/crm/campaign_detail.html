@@ -19,6 +19,28 @@
   {% if is_lead %}<a class="btn-outline" href="{% url 'crm:campaign_edit' campaign.pk %}">Edit</a>{% endif %}
 </div>
 
+{% if counts.stranded %}
+  {# The failure that reads as success: an interrupted batch leaves claimed
+     contacts that look like activity and will never move on their own. #}
+  <div class="alert alert-destructive mb-3">
+    <section>
+      <p>
+        <strong>{{ counts.stranded }} mailing(s) are stuck, not sending.</strong>
+        An agent reserved these contacts and never reported back — the usual
+        cause is a dropped connection mid-batch. <strong>These mails have not
+        gone out</strong>, and these contacts cannot be mailed for this campaign
+        again until they are resolved.
+      </p>
+      <p class="text-sm mt-1">
+        To fix: {% for name in stranded_members %}<strong>{{ name }}</strong>{% if not forloop.last %}, {% endif %}{% endfor %}
+        opens their local agent and presses <em>Resolve stranded drafts</em>.
+        That asks Gmail which ones actually went out, so nobody is mailed twice;
+        the rest become failed and can simply be sent again.
+      </p>
+    </section>
+  </div>
+{% endif %}
+
 <div class="grid grid-4 mb-3">
   <div class="card"><section class="stat">
     <div class="value">{{ assigned_pool }}</div><div class="label">assigned pool</div>
@@ -27,7 +49,11 @@
     <div class="value">{{ counts.sent }}</div><div class="label">sent</div>
   </section></div>
   <div class="card"><section class="stat">
-    <div class="value muted">{{ counts.draft }}</div><div class="label">draft / in flight</div>
+    <div class="value {% if counts.stranded %}s-MISSED{% else %}muted{% endif %}">{{ counts.draft }}</div>
+    <div class="label">
+      {% if counts.stranded %}{{ counts.stranded }} stuck{% if counts.in_flight %}, {{ counts.in_flight }} in flight{% endif %}
+      {% else %}in flight{% endif %}
+    </div>
   </section></div>
   <div class="card"><section class="stat">
     <div class="value {% if counts.failed %}s-FAILED{% endif %}">{{ counts.failed }}</div><div class="label">failed</div>
