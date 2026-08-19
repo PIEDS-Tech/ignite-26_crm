@@ -496,6 +496,22 @@ the page loading and Send being pressed.
 
 ### Stranded drafts
 
+A `draft` is **not a mail in flight**. It means an agent reserved that contact
+and the server never heard back. Nothing will happen to it on its own, and until
+it is resolved that contact **cannot be mailed for that campaign again** — the
+unique constraint that prevents double-sending also prevents re-sending.
+
+Resolve them from the member's own agent with **Resolve stranded drafts**, which
+asks Gmail which ones actually went out. Anything that did is recorded as sent;
+anything that did not becomes `failed`, and a failed mailing **can** be claimed
+again — so re-selecting those contacts and pressing Send simply works.
+
+`manage.py stranded_drafts` reports the backlog and names who has to clear it.
+Only that member's agent can: the mail left their mailbox, and only they hold the
+Gmail credentials to check it.
+
+#### The original design
+
 If the agent dies between steps 2 and 4, DRAFTs are left behind.
 `GET /mailings/drafts` lists your own; **Resolve stranded drafts** uses
 `GmailClient.find_message_to()` to ask **Gmail itself** whether that mail went

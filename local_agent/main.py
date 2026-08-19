@@ -8,6 +8,7 @@ credentials -- only a revocable API token and a Gmail OAuth token.
 import asyncio
 import json
 import logging
+import queue
 import threading
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -26,6 +27,7 @@ from local_agent.services import schedule_runner
 from local_agent.services import send as send_svc
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+log = logging.getLogger("ignite.agent")
 
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
@@ -189,29 +191,63 @@ def preflight(payload: SendRequest):
 
 @app.post("/api/send")
 def send(payload: SendRequest):
+    """Send a batch, streaming one result per contact.
+
+    The work runs in a BACKGROUND THREAD, and the response merely watches it.
+    That is not an optimisation. A streaming generator is closed by Starlette
+    the moment the client goes away, so with the sending loop inside it, closing
+    the tab -- or a laptop suspending, or wifi dropping -- killed the batch
+    mid-flight and left claimed contacts behind. A 400-contact send takes over
+    ten minutes; expecting a browser tab to survive that unattended is not a
+    reasonable thing to ask of anyone.
+
+    Now the batch runs to completion regardless of who is watching. The viewer
+    can leave and the mail still goes out; only the live progress is lost.
+    """
     _guard(gmail().verify_identity)
 
-    def stream():
+    results: queue.Queue = queue.Queue()
+    DONE = object()
+
+    def run():
         # Held for the whole batch so a scheduled job cannot start sending
-        # through the same mailbox halfway down this list. try/finally rather
-        # than `with` around the yields alone: a browser that navigates away
-        # closes the generator, and the lock must not go with it.
-        acquired = send_lock.acquire(timeout=120)
-        if not acquired:
-            yield json.dumps({"contact_id": "", "email": "", "name": "", "status": "FAILED",
-                              "detail": "a scheduled send is using the mailbox; try again"}) + "\n"
+        # through the same mailbox halfway down this list.
+        if not send_lock.acquire(timeout=120):
+            results.put({"contact_id": "", "email": "", "name": "", "status": "FAILED",
+                         "detail": "a scheduled send is using the mailbox; try again"})
+            results.put(DONE)
             return
         try:
             for outcome in send_svc.send_batch(
                 api(), gmail(), payload.campaign_id, payload.contact_ids,
                 cc=payload.cc, bcc=payload.bcc,
             ):
-                yield json.dumps(outcome.dict()) + "\n"
+                results.put(outcome.dict())
         except ApiError as exc:
-            yield json.dumps({"contact_id": "", "email": "", "name": "",
-                              "status": "FAILED", "detail": str(exc)}) + "\n"
+            results.put({"contact_id": "", "email": "", "name": "",
+                         "status": "FAILED", "detail": str(exc)})
+        except Exception as exc:                       # noqa: BLE001
+            log.exception("send batch crashed")
+            results.put({"contact_id": "", "email": "", "name": "", "status": "FAILED",
+                         "detail": f"{type(exc).__name__}: {exc}"})
         finally:
             send_lock.release()
+            results.put(DONE)
+
+    # Not a daemon: a batch in progress should hold the process open rather than
+    # being killed on shutdown with contacts claimed and unsent.
+    worker = threading.Thread(target=run, name="send-batch", daemon=False)
+    worker.start()
+
+    def stream():
+        while True:
+            try:
+                item = results.get(timeout=300)
+            except queue.Empty:
+                return                                 # worker wedged; it holds no lock forever
+            if item is DONE:
+                return
+            yield json.dumps(item) + "\n"
 
     return StreamingResponse(stream(), media_type="application/x-ndjson")
 
