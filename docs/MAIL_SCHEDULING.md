@@ -238,7 +238,7 @@ execution becomes `HELD`, then `MISSED` at the deadline: pausing is the document
 Per job: `batch_size`, `interval_minutes`, optional `per_day`, optional jitter so gaps are not
 machine-regular. Each tick takes `contact_ids[cursor : cursor + batch_size]` and advances.
 
-Two existing limits stay authoritative and are never overridden: `DAILY_SEND_CAP = 400`, enforced
+Two existing limits stay authoritative and are never overridden: `DAILY_SEND_CAP = 1000`, enforced
 server-side across every device a member uses, and `AGENT_SEND_DELAY_SECONDS` for intra-batch
 pacing. A drip that hits the cap parks until the 24-hour window rolls, exactly as `claim_batch`
 already reports `CAP_REACHED`.

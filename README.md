@@ -520,11 +520,23 @@ blindly.
 
 ### Daily cap
 
-`DAILY_SEND_CAP = 400`, enforced inside `claim_batch` by counting
+`DAILY_SEND_CAP = 1000`, enforced inside `claim_batch` by counting
 `sent_last_24h(member)`. Server-side deliberately — it counts across every device
 a member uses, so nobody evades it by opening the agent on a second laptop.
 Gmail's real per-account quota, once tripped, throttles the whole mailbox for
-hours.
+hours. Google Workspace publishes 2000 messages/day, 10,000 total recipients/day
+and **3000 external recipients/day** — and that last one is what binds, because
+Google counts **recipients** where this counts **mailings**, charging every
+To/Cc/Bcc address each time it is used.
+
+| 1000 mails with… | external recipients | outcome |
+|---|---|---|
+| no copies | 1000 | fine |
+| 3 Bcc on our own domain | 1000 | fine — internal copies are free |
+| 3 Bcc outside the domain | 4000 | Gmail cuts off near mail 750 |
+
+So keep standing copies internal. A batch with external Cc/Bcc can pass this cap
+and still be refused by Gmail.
 
 ### Outcome codes
 
@@ -1394,7 +1406,7 @@ than leaving it manual.
 **Polling is not instant.** Up to 20 seconds of staleness by design. The database
 is always correct immediately; only the screens lag.
 
-**No rate limit on `claim` beyond the daily cap.** A member could claim 400 in
+**No rate limit on `claim` beyond the daily cap.** A member could claim 1000 in
 one burst. Gmail's own throttling is the backstop.
 
 **The dashboard shows no lifecycle funnel yet.** `services/contacts.py`

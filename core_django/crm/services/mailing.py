@@ -38,7 +38,22 @@ FAILED = "FAILED"
 
 #: Gmail's per-account quota is real; tripping it throttles the whole mailbox
 #: for hours. Enforced server-side so it counts across every device a member uses.
-DAILY_SEND_CAP = 400
+#:
+#: 1000 sits inside Google Workspace's published limits for these
+#: @pilani.bits-pilani.ac.in accounts: 2000 messages/day, 10,000 total
+#: recipients/day, 3000 EXTERNAL recipients/day.
+#:
+#: This counts MAILINGS; Google counts RECIPIENTS, and every address in To, Cc
+#: and Bcc counts each time it is used. The external limit is the one that
+#: binds, and only when copies go outside the domain:
+#:
+#:   1000 mails, 3 Bcc on our own domain  -> 1000 external. Fine.
+#:   1000 mails, 3 Bcc outside the domain -> 4000 external. Cut off near 750.
+#:
+#: So a batch with external copies can satisfy this cap and still be refused by
+#: Gmail, which then throttles the whole mailbox for hours. Keep standing copies
+#: internal.
+DAILY_SEND_CAP = 1000
 
 #: CC/BCC apply to EVERY mail in a batch, so ten copied addresses on a 200-mail
 #: send is two thousand extra deliveries. Small enough to keep that a decision
